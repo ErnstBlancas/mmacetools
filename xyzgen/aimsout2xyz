@@ -72,6 +72,29 @@ def read_aimsout(name):
     return np.array(cell), np.array(pos), np.array(forces), atoms, nat, np.array(energies), np.array(stress)
 
 
+
+def read_aimsout_isolated(name):
+    fin = open(name,'r')
+    for line in fin:
+        if 'Atomic structure:' in line:
+            fin.readline() # skip one
+            line = fin.readline().split()
+            atom = line[3]
+        elif "Total energy uncorrected" in line:
+            energy = np.float64(line.split()[5])
+    fin.close()
+    return atom, energy
+
+def write_isolated(fout, energy, atom, label=None):
+    fout = open(fout, 'w')
+    first_line = f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy_dft={energy:12.8f} name={label} config_type=IsolatedAtom'
+    print("1", file=fout)
+    print(first_line, file=fout)
+    print(f"{atom} 0.0 0.0 0.0 0.0 0.0 0.0", file=fout)
+    fout.close()
+
+
+
 def write_xyz(fname, nat, atn, cells, positions, forces, energy, stress, pbc='T T T', label=None):
     isstress=False
     fout = open(fname, 'w')
@@ -85,8 +108,6 @@ def write_xyz(fname, nat, atn, cells, positions, forces, energy, stress, pbc='T 
             first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name={label}'
         else:
             first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name={label}'
-        if nat == 1:
-            first_line = first_line + ' config_type=IsolatedAtom'
         print(first_line, file=fout)
         for i in range(nat):
             pp = " ".join([f'{zz:12.8f}' for zz in positions[idx][i]]) 
@@ -110,8 +131,11 @@ def main():
     parser.add_argument("--files", "-i", nargs="+",
                         help="Path to FHI-AIMS outputs", required=True)
 
-    args = parser.parse_args()
+    parser.add_argument("--isolated", "-iso", nargs="+", default=None,
+                        help="Path to FHI-AIMS outputs with isolatedAtoms", required=False)
 
+    args = parser.parse_args()
+    
     if  1 < args.fraction < 100:
         args.fraction = args.fraction / 100
     if args.fraction >= 100:
@@ -133,19 +157,23 @@ def main():
     ## randon shuffle the in files
     np.random.shuffle(args.files) 
 
+    if args.isolated is not None:
+        for i in args.isolated:
+            atom, energy = read_aimsout_isolated(i)
+            write_isolated('tmp.xyz', energy, atom, label=i)
+            os.system(f'cat tmp.xyz >> {ftrain}')
+
     for i in range(ntrain):
         cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
         write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
                   pbc='T T T', label=args.files[i])
         os.system(f'cat tmp.xyz >> {ftrain}')
 
-        #print(f"{tmp[i]:40} {:40}", i)
     for i in range(ntrain, ntrain+ntest):
         cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
         write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
                   pbc='T T T', label=args.files[i])
         os.system(f'cat tmp.xyz >> {ftest}')
-
     os.remove('tmp.xyz')
 
 if __name__ == "__main__":
