@@ -87,7 +87,7 @@ def read_aimsout_isolated(name):
 
 def write_isolated(fout, energy, atom, label=None):
     fout = open(fout, 'w')
-    first_line = f'Properties=species:S:1:pos:R:3:forces:R:3 pbc="F F F" energy_dft={energy:12.8f} name={label} config_type=IsolatedAtom'
+    first_line = f'Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc="F F F" energy_dft={energy:12.8f} name={label} config_type=IsolatedAtom'
     print("1", file=fout)
     print(first_line, file=fout)
     print(f"{atom} 0.0 0.0 0.0 0.0 0.0 0.0", file=fout)
@@ -105,9 +105,9 @@ def write_xyz(fname, nat, atn, cells, positions, forces, energy, stress, pbc='T 
         lat = " ".join([f'{zz:12.8f}' for zz in cell.flatten()])
         if isstress:
             lstress=" ".join([f'{zz:12.8f}' for zz in stress[idx].flatten()])
-            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name={label}'
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name={label}'
         else:
-            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name={label}'
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name={label}'
         print(first_line, file=fout)
         for i in range(nat):
             pp = " ".join([f'{zz:12.8f}' for zz in positions[idx][i]]) 
