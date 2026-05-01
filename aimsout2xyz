@@ -1,0 +1,152 @@
+#!/usr/bin/python
+import numpy as np
+from glob import glob
+import os
+import argparse
+
+def read_aimsout(name):
+    fin = open(name,'r')
+    cell, pos, forces, atoms, energies = [], [], [], [], []
+    isstress = False
+    stress = []
+    for line in fin:
+        if 'Input geometry:' in line:
+            celdum = []
+            posdum = []
+            fin.readline() #| Unit cell:
+            for i in range(3): 
+                celdum.append([np.float64(zz) for zz in fin.readline().split()[1:]])
+            cell.append(celdum)
+            fin.readline() #| atomic structure:
+            fin.readline() #| Atom x[A] y[A] z[A]
+            while True:
+                ll = fin.readline()
+                if 'Species' not in ll:
+                    break
+                posdum.append([np.float64(zz) for zz in ll.split()[4:]])
+                atoms.append(ll.split()[3])
+            pos.append(np.array(posdum))
+
+        elif '| Number of atoms' in line:
+            nat = int(line.split()[5])
+    
+        elif ' Total atomic forces' in line:
+            fordum = []
+            for i in range(nat):
+                fordum.append([np.float64(zz) for zz in fin.readline().split()[2:]])
+            forces.append(fordum)
+
+        elif 'Total energy uncorrected' in line:
+            energies.append(np.float64(line.split()[5]))
+
+        elif 'Updated atomic structure:' in line:
+            fin.readline() # skip one line
+            celdum, posdum = [], []
+            for i in range(3):
+                celdum.append([np.float64(zz) for zz in fin.readline().split()[1:]])
+            cell.append(np.array(celdum))
+            fin.readline() # skip one line
+            for i in range(nat):
+                posdum.append([np.float64(zz) for zz in fin.readline().split()[1:4]])
+            pos.append(np.array(posdum))
+
+        elif 'Final atomic structure:' in line:
+            fin.readline() # skip one line
+            celdum, posdum = [], []
+            for i in range(3):
+                celdum.append([np.float64(zz) for zz in fin.readline().split()[1:]])
+            cell.append(np.array(celdum))
+            fin.readline() # skip one line
+            for i in range(nat):
+                posdum.append([np.float64(zz) for zz in fin.readline().split()[1:4]])
+            pos.append(np.array(posdum))
+        elif 'Analytical stress tensor - Symmetrized' in line:
+            isstress = True
+            stresdum = []
+            for i in range(4):
+                fin.readline()
+            for i in range(3):
+                stresdum.append([np.float64(zz) for zz in fin.readline().split()[2:5]])
+            stress.append(np.array(stresdum))
+    fin.close()
+    return np.array(cell), np.array(pos), np.array(forces), atoms, nat, np.array(energies), np.array(stress)
+
+
+def write_xyz(fname, nat, atn, cells, positions, forces, energy, stress, pbc='T T T', label=None):
+    isstress=False
+    fout = open(fname, 'w')
+    if len(stress) > 0:
+        isstress=True
+    for idx, cell in enumerate(cells):
+        print(nat, file=fout)
+        lat = " ".join([f'{zz:12.8f}' for zz in cell.flatten()])
+        if isstress:
+            lstress=" ".join([f'{zz:12.8f}' for zz in stress[idx].flatten()])
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name={label}'
+        else:
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name={label}'
+        if nat == 1:
+            first_line = first_line + ' config_type=IsolatedAtom'
+        print(first_line, file=fout)
+        for i in range(nat):
+            pp = " ".join([f'{zz:12.8f}' for zz in positions[idx][i]]) 
+            ff = " ".join([f'{zz:12.8f}' for zz in forces[idx][i]]) 
+            print(f'{atn[i]:4} {pp} {ff}', file=fout)
+    fout.close()
+
+def main():
+    parser = argparse.ArgumentParser(
+            prog='aimsout2xyz',
+            description="""
+            Extract positions, forces and stresses (if present) from FHI-AIMS output.
+            For a relaxation extract all the step forces and geometries
+            """)
+    parser.add_argument("--fraction", "-f", type=float,
+                        help="Train-Test", default=0.1)
+
+    parser.add_argument("--fout", "-o", type=str, help="XYZ output name",
+                        default="aims_output")
+     
+    parser.add_argument("--files", "-i", nargs="+",
+                        help="Path to FHI-AIMS outputs", required=True)
+
+    args = parser.parse_args()
+
+    if  1 < args.fraction < 100:
+        args.fraction = args.fraction / 100
+    if args.fraction >= 100:
+        print("Train-Test fraction can't be greater than 100/1")
+        exit()
+
+    ftrain = args.fout +".train.xyz"
+    if os.path.isfile(ftrain): 
+        os.remove(ftrain)
+    ftest= args.fout +".test.xyz"
+    if os.path.isfile(ftest): 
+        os.remove(ftest)
+
+    nfiles = len(args.files)
+    ntest = round(nfiles *args.fraction)
+    ntrain = nfiles - ntest
+    print("Trainig set:", ftrain, " nstructures: ",ntrain)
+    print("Test set:", ftrain, " nstructures: ",ntest)
+    ## randon shuffle the in files
+    np.random.shuffle(args.files) 
+
+    for i in range(ntrain):
+        cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
+        write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
+                  pbc='T T T', label=args.files[i])
+        os.system(f'cat tmp.xyz >> {ftrain}')
+
+        #print(f"{tmp[i]:40} {:40}", i)
+    for i in range(ntrain, ntrain+ntest):
+        cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
+        write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
+                  pbc='T T T', label=args.files[i])
+        os.system(f'cat tmp.xyz >> {ftest}')
+
+    os.remove('tmp.xyz')
+
+if __name__ == "__main__":
+    main()
