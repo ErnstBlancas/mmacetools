@@ -1,8 +1,7 @@
 #!/home/ernesto/install/ase/bin/python3.14
-from ase.io import read, write
+import argparse, os
 import numpy as np
-import os
-import argparse
+
 def main():
     parser = argparse.ArgumentParser(
             prog='mdsampler',
@@ -23,13 +22,31 @@ def main():
     parser.add_argument("--format", "-f", required=False, default="aims",
                         help="Output formart from ASE for the writen geometries")
     
+    parser.add_argument("--amplitude", required=False, default=None, type=float,
+                        help="Random amplitude in for additional rattle. Amplitude in Angstrom")
+
+    parser.add_argument("--seed", required=False, default=None, type=int,
+                        help="Seed for the random generator default")
+
     args = parser.parse_args()
     
+    from ase.io import read, write
+
     samples = []
     for f in args.path:
         for s in read(f, ":"):
             samples.append(s)
-    
+    addrand = False
+    if args.amplitude is not None:
+        addrand = True
+        if args.seed is not None:
+            rs = np.random.RandomState(args.seed)
+        else:
+            from time import time
+            args.seed =int(time())
+            rs = np.random.RandomState(args.seed)
+        print('Using seed: ', args.seed)
+        print('Random amplitude: ', args.amplitude, ' (ang)')
     np.random.shuffle(samples)
     sels = np.random.choice(np.arange(0, len(samples)), args.samples, replace=False) ## ful random
     print(f'Removing {args.outfolder}*/')
@@ -37,7 +54,11 @@ def main():
     for sel in sels:
         path = f'{args.outfolder}-{sel:03d}'
         os.mkdir(path)
+        if addrand:
+            rand = rs.randn(samples[sel].positions.shape[0],samples[sel].positions.shape[1])*args.amplitude
+            samples[sel].positions+=rand
         write(f'{path}/{path}.in', samples[sel],format=args.format)
+    
 
 if __name__ == "__main__":
     main()
