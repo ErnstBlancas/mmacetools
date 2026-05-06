@@ -4,28 +4,12 @@ from ase.io import read, write
 import numpy as np
 warnings.filterwarnings("ignore")
 
-#def update_config(filename, max):
-#    fin = open(filename, 'r')
-#    fout = open('tmp', 'w')
-#    for line in fin:
-#        if 'max_num_epochs:' in line:
-#            print(f'max_num_epochs: {max}', file=fout)
-#        elif 'results' in line:
-#            print(" ".join(line.split())+'-extend',file=fout)
-#        elif 'log_dir' in line:
-#            print(" ".join(line.split())+'-extend',file=fout)
-#        else:
-#            print(line.strip(), file=fout)
-#    print('restart_latest: True', file=fout)
-#    fin.close()
-#    os.system(f'mv tmp {filename}')
-
 #################### input ####################
 dftsources = '*.xyz'    ## dftxyz files to shuffle again
-nmax = 56               ## max number of core
+nmax = 256               ## max number of core
 ncore_per_task0 = 2     ## to run nmax//ncore_per_task0 initial seeds
-nlast = 4               ## run nmax//nlast best models with more epochs
-max_epochs = [2, 4]   ## max_epochs for the best seeds
+nlast = 8               ## run nmax//nlast best models with more epochs
+max_epochs = [2, 20]   ## max_epochs for the best seeds
 use = 'force'           ## best model: force='rmse_f', energy='rmse_e_per_atom', loss='loss'
 worst = True            ## if true train nlast-1 models and the worst performing one
 config = {              ## or read corresponding config.yaml
@@ -36,8 +20,8 @@ config = {              ## or read corresponding config.yaml
           'name': 'finetune.model',
           'foundation_model': '../finetune.model.model',
           'multiheads_finetuning': False,
-          'train_file': 'kk', 
-          'test_file': 'kk', 
+          'train_file': 'train.xyz', 
+          'test_file': 'test.xyz', 
           'valid_fraction': 0.20,
           'energy_weight': 1.0,
           'forces_weight': 100.0,
@@ -82,8 +66,7 @@ def process_results(path, nlast, use, worst=None):
         paths.append(files[best[-1]].split('/')[0])
     else:
         paths = [files[best[i]].split('/')[0] for i in range(nlast)]
-
-    return paths
+    return paths, stats
 
 
 class mace_process(Process):
@@ -93,16 +76,12 @@ class mace_process(Process):
         self.ncpu = ncpu
         self.seed = np.random.randint(0, 10000)
         self.is_extend = False
-        self.dir_ext = dir
         self.config = config
         self.configfile = configfile
-        self.config['seed'] = self.seed
         self.dftsources = dft
         self.fraction = trainfraction
         if dir:
-            self.config['restart_latest'] = True
-            self.config['log_dir'] = self.config['logs-res']+'ext'
-            self.config['results'] = self.config['results-res']+'-ext'
+            self.is_extend = True
             self.path = dir
         self.config['max_num_epochs'] = epochs
 
@@ -110,14 +89,23 @@ class mace_process(Process):
         fout = open(f'{self.path}/{self.configfile}', 'w')
         for i in self.config:
             if i == "E0s":
-                print(i,": ", f'"{self.config[i]}"', file=fout)
+                print(f'{i}: "{self.config[i]}"', file=fout)
+            elif i == "seed":
+                print(f'{i}: {self.seed}', file=fout)
             else:
-                print(i,": ", self.config[i], file=fout)
+                print(f'{i}: {self.config[i]}', file=fout)
+        fout.close()
+
+    def _write_yaml_ext(self):
+        fout = open(f'{self.path}/{self.configfile}', 'w')
+        for i in self.config:
+            if i == "E0s":
+                print(f'{i}: "{self.config[i].strip()}"', file=fout)
+            else:
+                print(f'{i}: {self.config[i].strip()}', file=fout)
         fout.close()
 
     def _shuffle(self):
-        self.config['train_file'] = f"train.xyz"
-        self.config['test_file'] = f"test.xyz"
         os.system(f' rm {self.path}/*xyz 2>/dev/null')
         n = len(self.dftsources)
         ntrain = int(n*self.fraction)
@@ -125,11 +113,10 @@ class mace_process(Process):
         rs.shuffle(self.dftsources)
         for i in range(ntrain):
             write(f'tmp-{self.seed}.xyz', self.dftsources[i])
-            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/train.xyz')
+            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/{self.config['train_file']}')
         for i in range(ntrain,n):
             write(f'tmp-{self.seed}.xyz', self.dftsources[i])
-            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/test.xyz')
-
+            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/{self.config['test_file']}')
         os.remove(f'tmp-{self.seed}.xyz')
 
     def gen_path(self):
@@ -137,8 +124,22 @@ class mace_process(Process):
         if os.path.isdir(self.path):
             os.system(f'rm -f {path}')
         os.mkdir(self.path)
-        if not self.is_extend:       
-            self._shuffle()
+        self._shuffle()
+        self._write_yaml()
+
+    def load_config(self):
+        fin = open(f'{self.path}/{self.configfile}', 'r')
+        config = {}
+        for line in fin:
+            line = line.strip()
+            key = line.split(':')[0]
+            config[key] = line[len(key)+1:]
+        fin.close()
+        self.seed = int(config['seed'])
+        self.config['restart_latest'] = True
+        self.config['log_dir'] = self.config['log_dir']+'ext'
+        self.config['results'] = self.config['results']+'-ext'
+        self.configfile = "config-ext.yaml"
         self._write_yaml()
 
     def finetune(self):
@@ -146,31 +147,26 @@ class mace_process(Process):
         import torch
         torch.set_num_threads(self.ncpu)
         logging.getLogger().handlers.clear()
-        #go to the correct dir
-        if self.dir_ext:
-            os.chdir(self.dir_ext)
-            print('hola hola')
-        else:
-            os.chdir(self.path)
-        os.system('pwd')
-
         sys.argv = ["program", "--config", self.configfile]
         mace_run_train_main()
 
     def run(self):
-        self.gen_path()
+        if self.is_extend:
+            self.load_config()
+        if not self.is_extend:
+            self.gen_path()
+        os.chdir(self.path)
         self.finetune()
 
-
 if __name__ == "__main__":
-    ## no parallel
+    # no parallel
     if type(dftsources) == str:
         files = glob.glob(dftsources)
     dftsamples = []
     for f in files:
         for s in read(f, ':'):
             dftsamples.append(s)
-
+    ## init
     pps = []
     for i in range(nmax//ncore_per_task0):
         pps.append(mace_process(ncore_per_task0, config,configfile0,
@@ -180,10 +176,11 @@ if __name__ == "__main__":
         i.start()
     for i in pps:
         i.join()
-    paths = process_results('seed*/results-res/*txt', nlast, use, True)
+    paths, stats = process_results('seed*/results-res/*txt', nlast, use, True)
+    ## best
     pps = []
     for path in paths:
-        pps.append(mace_process(ncore_per_task0, config, configfile0,
+        pps.append(mace_process(nmax//nlast, config, configfile0,
                                 dftsamples, fraction,max_epochs[1], path)
                    )
     for i in pps:
