@@ -16,8 +16,8 @@ def main():
     parser.add_argument("--path", "-i", nargs="+", required=True,
                         help="Path to XYZ file that contains MD simulation")
 
-    parser.add_argument("--outfolder", "-o", nargs="+", required=False, default="sample",
-                        help="name-03d for sampled geometries")
+    parser.add_argument("--outfolder", "-o", required=False, default="sample",
+                        type=str, help="name-03d for sampled geometries")
 
     parser.add_argument("--format", "-f", required=False, default="aims",
                         help="Output formart from ASE for the writen geometries")
@@ -39,26 +39,28 @@ def main():
     addrand = False
     if args.amplitude is not None:
         addrand = True
-        if args.seed is not None:
-            rs = np.random.RandomState(args.seed)
-        else:
-            from time import time
-            args.seed =int(time())
-            rs = np.random.RandomState(args.seed)
-        print('Using seed: ', args.seed)
+    if args.seed is not None:
+        rs = np.random.RandomState(args.seed)
+    else:
+        from time import time
+        args.seed =int(time())
+        rs = np.random.RandomState(args.seed)
         print('Random amplitude: ', args.amplitude, ' (ang)')
-    np.random.shuffle(samples)
-    sels = np.random.choice(np.arange(0, len(samples)), args.samples, replace=False) ## ful random
+    rs.shuffle(samples)
+    sels = rs.choice(np.arange(0, len(samples)), args.samples, replace=False) ## ful random
     print(f'Removing {args.outfolder}*/')
+    print('Using seed: ', args.seed)
     os.system(f'rm -r {args.outfolder}*/ 2>/dev/null')
+    cc = 0 
     for sel in sels:
-        path = f'{args.outfolder}-{sel:03d}'
+        path = f'{args.outfolder}-{cc:03d}'
         os.mkdir(path)
         if addrand:
             rand = rs.randn(samples[sel].positions.shape[0],samples[sel].positions.shape[1])*args.amplitude
             samples[sel].positions+=rand
         write(f'{path}/{path}.in', samples[sel],format=args.format)
-    
+        os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel}/' {path}/{path}.in")
+        cc+=1
 
 if __name__ == "__main__":
     main()

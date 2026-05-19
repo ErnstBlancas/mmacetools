@@ -42,6 +42,7 @@ config = {              ## or read corresponding config.yaml
           }
 configfile0 = 'config.yaml' ## config filename
 fraction = 0.8          ## dftsources use for training
+clean = True            ## remove not valid seeds files
 ############################################### 
 
 def process_results(path, nlast, use, worst=None):
@@ -68,6 +69,12 @@ def process_results(path, nlast, use, worst=None):
         paths = [files[best[i]].split('/')[0] for i in range(nlast)]
     return paths, stats
 
+def clean_init(all_path, best_path):
+    for i in glob.glob(all_files):
+        if i in path_best:
+            continue
+        else:
+            os.system(f'rm -rf {i}')
 
 class mace_process(Process):
     def __init__(self, ncpu, config, configfile, dft, trainfraction, epochs, dir=None):
@@ -187,3 +194,6 @@ if __name__ == "__main__":
         i.start()
     for i in pps:
         i.join()
+    # remove all the useless stuff
+    if clean:
+        clean_init('seed*/', paths):
