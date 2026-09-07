@@ -11,30 +11,43 @@ def cut_outliers(data, cut):
     d = np.abs(data -np.median(data))
     mdev = np.median(d)
     s= d/mdev
-    print(cut)
     data[np.where(s>cut)] = np.nan
     return data
 
+
+def get_seed(words):
+    for zz in words:
+        if 'seed' in zz:
+            return int(zz[5:])
+        elif 'best' in zz:
+            return int(zz.split('_')[-1])
+
 files = '*/results-res/*txt'
+#print(glob.glob(files))
+
+
+### files = 'seed*/results-res/*txt'
 stats, seed = [], []
 for f in glob.glob(files):
     fin = open(f, 'r').readlines()
-    seed.append(int(f.split('/')[0][5:]))
+    seed.append(get_seed(f.split('/')))
     res = json.loads(fin[-1])
     stats.append(np.array([res['loss'],res['rmse_e_per_atom']*1000,res['mae_e_per_atom']*1000,
-                            res['rmse_f'], res['rel_rmse_f'],
-                            res['mae_f'], res['rel_mae_f']]))
+                           res['rmse_f'], res['rel_rmse_f'],
+                           res['mae_f'], res['rel_mae_f']]))
 stats = np.array(stats)
+
 files_ext = '*/results-res-ext/*txt'
 stats_ext, seed_ext = [], []
 for f in glob.glob(files_ext):
     fin = open(f, 'r').readlines()
-    seed_ext.append(int(f.split('/')[0][5:]))
+    seed_ext.append(get_seed(f.split('/')))
     res = json.loads(fin[-1])
     stats_ext.append(np.array([res['loss'],res['rmse_e_per_atom']*1000,res['mae_e_per_atom']*1000,
                             res['rmse_f'], res['rel_rmse_f'],
                             res['mae_f'], res['rel_mae_f']]))
 stats_ext = np.array(stats_ext)
+
 idx_best = []
 for i in seed_ext:
     cc = 0
@@ -43,119 +56,109 @@ for i in seed_ext:
             idx_best.append(cc)
         cc+=1
 
-xx = np.arange(0, stats.shape[0])
-
-## loss plot
+## LOSS PLOT
 fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(6.4*2, 4.8*1), sharex=False,
                        sharey=False, gridspec_kw={})
-
-
-ax[0].plot(xx, cut_outliers(stats[:, 0], 20), color='blue', marker='.', linestyle='dashed')
+ax
+xx = np.arange(0, stats.shape[0])
+ax[0].plot(xx, stats[:, 0], color='blue', marker='x', linestyle='none')
 cc=0
 for i in idx_best:
-    ax[0].plot(xx[i], stats[i][0], color='red', marker='o')
+    ax[0].scatter(xx[i], stats[i][0], color='red', marker='o', facecolor='none', s=200)
     ax[1].plot(xx[i], stats_ext[cc][0], color='red', marker='o')
-    ax[1].text(xx[i]+2,stats_ext[cc][0], seed_ext[cc])
+    ax[1].text(xx[i]+stats_ext[cc][0]*1.5,stats_ext[cc][0], seed_ext[cc],fontsize=16)
     cc+=1
-
+ax[0].scatter(xx[i], stats[i][0], color='red', marker='o', facecolor='none', s=200, label='Best')
+ax[0].legend()
 for i in range(2):
     ax[i].set_xticklabels([])
     ax[i].set_xlabel('Random seed')
     ax[i].set_ylabel('loss')
-    ax[i].set_xlim([0, len(xx)])
-ll = []
-ll.append(Line2D([0], [0], color='blue', label='loss', linestyle='dashed', marker='.'))
-ll.append(Line2D([0], [0], color='red', label='loss best', linestyle='none', marker='o'))
-ax[0].legend(handles=ll)
-ll = []
-ll.append(Line2D([0], [0], color='red', label='loss ext', linestyle='none', marker='o'))
-ax[1].legend(handles=ll)
+ax[0].set_title('First 10 epoch',fontsize=18)
+ax[1].set_title('Best after 200 epoch',fontsize=18)
 fig.savefig('loss.png')
 
 
-# energy plot
 fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(6.4*2, 4.8*1), sharex=False,
                        sharey=False, gridspec_kw={})
-
-ax[0].plot(xx, cut_outliers(stats[:, 1], 200), color='blue', marker='.', linestyle='none')
-ax[0].plot(xx, cut_outliers(stats[:, 2], 200), color='red', marker='x', linestyle='none')
-xlim = ax[0].get_xlim()
+xx = np.arange(0, stats.shape[0])
+ax[0].plot(xx, stats[:, 3]*1e3, color='blue', marker='x', linestyle='none',
+           label='RMSE F')
+ax[0].plot(xx, stats[:, 5]*1e3, color='green', marker='s', linestyle='none',
+           label='MAE F')
 cc=0
 for i in idx_best:
-    ax[0].plot(xx[i], stats[i][1], color='green', marker='o')
-    ax[0].plot(xx[i], stats[i][2], color='green', marker='d')
-    ax[1].plot(xx[i], stats_ext[cc][1], color='blue', marker='.')
-    ax[1].text(xx[i]+2,stats_ext[cc][1], seed_ext[cc])
-    ax[1].plot(xx[i], stats_ext[cc][2], color='red', marker='x')
+    ax[0].scatter(xx[i], stats[i][3]*1e3, color='red', marker='o',
+                  facecolor='none', s=200)
+    ax[0].scatter(xx[i], stats[i][5]*1e3, color='red', marker='o',
+                  facecolor='none', s=200)
+    ax[1].plot(xx[i], stats_ext[cc][3]*1e3, color='blue', marker='x')
+    ax[1].plot(xx[i], stats_ext[cc][5]*1e3, color='green', marker='s')
+    ax[1].text(xx[i]+stats_ext[cc][5]*0.1,stats_ext[cc][5]*1e3,
+               seed_ext[cc],fontsize=16)
     cc+=1
+
+ax[0].scatter(xx[i], stats[i][5]*1e3, color='red', marker='o',
+              facecolor='none', s=200, label='Best')
+ax[1].plot(xx[i], stats_ext[cc-1][3]*1e3, color='blue', marker='x', label='RMSE')
+ax[1].plot(xx[i], stats_ext[cc-1][5]*1e3, color='green', marker='s', label='MAE')
+
+ax[0].legend(frameon=True)
+ax[1].legend(frameon=True)
 for i in range(2):
     ax[i].set_xticklabels([])
-    ax[i].set_xlabel('Random seed')
-    ax[i].set_ylabel('RMSE/MAE E per atom (meV)')
-    ax[i].set_xlim(xlim)
+    ax[i].set_ylabel('MAE/RMSE (meV/ang)')
+    ax[i].set_xlabel('seed')
+ax[0].set_title('First 10 epoch',fontsize=18)
+ax[1].set_title('Best after 200 epoch',fontsize=18)
+fig.savefig('forces.png')
 
-ll1 = []
-ll1.append(Line2D([0], [0], color='blue', label='RMSE', linestyle='none', marker='.'))
-ll1.append(Line2D([0], [0], color='blue', label='MAE', linestyle='none', marker='x'))
-ll1.append(Line2D([0], [0], color='green', label='RMSE best', linestyle='none', marker='o'))
-ll1.append(Line2D([0], [0], color='green', label='MAE best', linestyle='none', marker='d'))
-ax[0].legend(handles=ll1)
-ll2 = []
-ll2.append(Line2D([0], [0], color='blue', label='RMSE ext', linestyle='none', marker='.'))
-ll2.append(Line2D([0], [0], color='red', label='MAE ext', linestyle='none', marker='x'))
-ax[1].legend(handles=ll2)
+fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(6.4*2, 4.8*1), sharex=False,
+                       sharey=False, gridspec_kw={})
+xx = np.arange(0, stats.shape[0])
+ax[0].plot(xx, stats[:, 1], color='blue', marker='x', linestyle='none',
+           label='RMSE F')
+ax[0].plot(xx, stats[:, 2], color='green', marker='s', linestyle='none',
+           label='MAE F')
+cc=0
+for i in idx_best:
+    ax[0].scatter(xx[i], stats[i][1], color='red', marker='o',
+                  facecolor='none', s=200)
+    ax[0].scatter(xx[i], stats[i][2], color='red', marker='o',
+                  facecolor='none', s=200)
+    ax[1].plot(xx[i], stats_ext[cc][1], color='blue', marker='x')
+    ax[1].plot(xx[i], stats_ext[cc][2], color='green', marker='s')
+    ax[1].text(xx[i]+stats_ext[cc][2]*0.1,stats_ext[cc][2],
+               seed_ext[cc],fontsize=16)
+    cc+=1
+
+ax[0].scatter(xx[i], stats[i][2], color='red', marker='o',
+              facecolor='none', s=200, label='Best')
+ax[1].plot(xx[i], stats_ext[cc-1][1], color='blue', marker='x', label='RMSE')
+ax[1].plot(xx[i], stats_ext[cc-1][2], color='green', marker='s', label='MAE')
+
+ax[0].legend(frameon=True)
+ax[1].legend(frameon=True)
+for i in range(2):
+    ax[i].set_xticklabels([])
+    ax[i].set_ylabel('E MAE/RMSE per atom (meV)')
+    ax[i].set_xlabel('seed')
+ax[0].set_title('First 10 epoch',fontsize=18)
+ax[1].set_title('Best after 200 epoch',fontsize=18)
 fig.savefig('energy.png')
 
 
 
-##forces
-fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(6.4*2, 4.8*1), sharex=False,
-                       sharey=False, gridspec_kw={})
 
-ax[0].plot(xx, cut_outliers(stats[:, 3], 20), color='blue', marker='.', linestyle='none')
-ax[0].plot(xx, cut_outliers(stats[:, 5], 20), color='red', marker='x', linestyle='none')
-xlim = ax[0].get_xlim()
-cc=0
-for i in idx_best:
-    ax[0].plot(xx[i], stats[i][3], color='green', marker='o')
-    ax[0].plot(xx[i], stats[i][5], color='green', marker='d')
-    ax[1].plot(xx[i], stats_ext[cc][3]*1000, color='blue', marker='.')
-    ax[1].text(xx[i]+2,stats_ext[cc][3]*1000, seed_ext[cc])
-    ax[1].plot(xx[i], stats_ext[cc][5]*1000, color='red', marker='x')
-    cc+=1
-for i in range(2):
-    ax[i].set_xticklabels([])
-    ax[i].set_xlabel('Random seed')
-    ax[i].set_ylabel('RMSE/MAE F (eV/ang)')
-    ax[i].set_xlim(xlim)
-#
-ax[i].set_ylabel('RMSE/MAE F (meV/ang)')
-ax[0].legend(handles=ll1)
-ax[1].legend(handles=ll2)
-fig.savefig('forces.png')
-
-# forces rel
-fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(6.4*2, 4.8*1), sharex=False,
-                       sharey=False, gridspec_kw={})
-
-ax[0].plot(xx, cut_outliers(stats[:, 4], 20), color='blue', marker='.', linestyle='none')
-ax[0].plot(xx, cut_outliers(stats[:, 6], 20), color='red', marker='x', linestyle='none')
-xlim = ax[0].get_xlim()
-cc=0
-for i in idx_best:
-    ax[0].plot(xx[i], stats[i][4], color='green', marker='o')
-    ax[0].plot(xx[i], stats[i][6], color='green', marker='d')
-    ax[1].plot(xx[i], stats_ext[cc][4], color='blue', marker='.')
-    ax[1].text(xx[i]+2,stats_ext[cc][4], seed_ext[cc])
-    ax[1].plot(xx[i], stats_ext[cc][6], color='red', marker='x')
-    cc+=1
-for i in range(2):
-    ax[i].set_xticklabels([])
-    ax[i].set_xlabel('Random seed')
-    ax[i].set_ylabel('Rel error F (%)')
-    ax[i].set_xlim(xlim)
-#
-ax[i].set_ylabel('Rel error F (%)')
-ax[0].legend(handles=ll1)
-ax[1].legend(handles=ll2)
-fig.savefig('rel-forces.png')
+### print(f"Best lost: {seed_ext[np.argmin(stats_ext[:, 0])]}")
+### print(f"Best rmse_per_atom: {seed_ext[np.argmin(stats_ext[:, 1])]}")
+### print(f"Best mae_per_atom: {seed_ext[np.argmin(stats_ext[:, 2])]}")
+### print(f"Best rmse_f: {seed_ext[np.argmin(stats_ext[:, 3])]}")
+### print(f"Best rel_rmse_f: {seed_ext[np.argmin(stats_ext[:, 4])]}")
+### print(f"Best mae_f: {seed_ext[np.argmin(stats_ext[:, 5])]}")
+### print(f"Best rel_mae_f: {seed_ext[np.argmin(stats_ext[:, 6])]}")
+### 
+###     #stats.append(np.array([res['loss'],res['rmse_e_per_atom']*1000,res['mae_e_per_atom']*1000,
+###     #                        res['rmse_f'], res['rel_rmse_f'],
+###     #                        res['mae_f'], res['rel_mae_f']]))
+### 

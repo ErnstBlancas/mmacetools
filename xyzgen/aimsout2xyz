@@ -123,7 +123,7 @@ def main():
             For a relaxation extract all the step forces and geometries
             """)
     parser.add_argument("--fraction", "-f", type=float,
-                        help="Train-Test", default=0.1)
+                        help="Train-Test", default=None, required=False)
 
     parser.add_argument("--fout", "-o", type=str, help="XYZ output name",
                         default="aims_output")
@@ -136,45 +136,63 @@ def main():
 
     args = parser.parse_args()
     
-    if  1 < args.fraction < 100:
-        args.fraction = args.fraction / 100
-    if args.fraction >= 100:
-        print("Train-Test fraction can't be greater than 100/1")
-        exit()
+    if args.fraction:
+        if  1 < args.fraction < 100:
+            args.fraction = args.fraction / 100
+        if args.fraction >= 100:
+            print("Train-Test fraction can't be greater than 100/1")
+            exit()
 
-    ftrain = args.fout +".train.xyz"
-    if os.path.isfile(ftrain): 
-        os.remove(ftrain)
-    ftest= args.fout +".test.xyz"
-    if os.path.isfile(ftest): 
-        os.remove(ftest)
+        ftrain = args.fout +".train.xyz"
+        if os.path.isfile(ftrain): 
+            os.remove(ftrain)
+        ftest= args.fout +".test.xyz"
+        if os.path.isfile(ftest): 
+            os.remove(ftest)
 
-    nfiles = len(args.files)
-    ntest = round(nfiles *args.fraction)
-    ntrain = nfiles - ntest
-    print("Trainig set:", ftrain, " nstructures: ",ntrain)
-    print("Test set:", ftrain, " nstructures: ",ntest)
-    ## randon shuffle the in files
-    np.random.shuffle(args.files) 
+        nfiles = len(args.files)
+        ntest = round(nfiles *args.fraction)
+        ntrain = nfiles - ntest
+        print("Trainig set:", ftrain, " nstructures: ",ntrain)
+        print("Test set:", ftrain, " nstructures: ",ntest)
+        ## randon shuffle the in files
+        if args.isolated is not None:
+            for i in args.isolated:
+                atom, energy = read_aimsout_isolated(i)
+                write_isolated('tmp.xyz', energy, atom, label=i)
+                os.system(f'cat tmp.xyz >> {ftrain}')
 
-    if args.isolated is not None:
-        for i in args.isolated:
-            atom, energy = read_aimsout_isolated(i)
-            write_isolated('tmp.xyz', energy, atom, label=i)
+        for i in range(ntrain):
+            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
+            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
+                      pbc='T T T', label=args.files[i])
             os.system(f'cat tmp.xyz >> {ftrain}')
 
-    for i in range(ntrain):
-        cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
-        write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
-                  pbc='T T T', label=args.files[i])
-        os.system(f'cat tmp.xyz >> {ftrain}')
+        for i in range(ntrain, ntrain+ntest):
+            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
+            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
+                      pbc='T T T', label=args.files[i])
+            os.system(f'cat tmp.xyz >> {ftest}')
+    else:
+        nfiles = len(args.files)
+        print("Dataset:", args.fout +".xyz", " nstructures: ", nfiles)
+        if args.isolated is not None:
+            for i in args.isolated:
+                atom, energy = read_aimsout_isolated(i)
+                write_isolated('tmp.xyz', energy, atom, label=i)
+                os.system(f'cat tmp.xyz >> {ftrain}')
 
-    for i in range(ntrain, ntrain+ntest):
-        cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
-        write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
-                  pbc='T T T', label=args.files[i])
-        os.system(f'cat tmp.xyz >> {ftest}')
+        for i in range(nfiles):
+            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
+            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
+                      pbc='T T T', label=args.files[i])
+            os.system(f'cat tmp.xyz >> {args.fout}.xyz')
+
     os.remove('tmp.xyz')
+
+
+
+        
 
 if __name__ == "__main__":
     main()

@@ -35,7 +35,7 @@ config = {              ## or read corresponding config.yaml
           'device': 'cpu',
           'r_max': 6.0, 
           'energy_key': 'energy_dft',
-          'forces_key': 'forces',
+          'forces_key': 'forces_dft',
           'E0s': "{8:-0.204170677752367E+04, 13:-0.661017373326158E+04}",
           'seed': 101,
           'restart_latest': False,
@@ -196,4 +196,4 @@ if __name__ == "__main__":
         i.join()
     # remove all the useless stuff
     if clean:
-        clean_init('seed*/', paths):
+        clean_init('seed*/', paths)
