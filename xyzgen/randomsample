@@ -2,6 +2,64 @@
 import argparse, os
 import numpy as np
 
+def _rattle(samples, sels, rs, amplitude):
+    """Add Gaussian noise of width `amplitude` (ang) to the selected frames."""
+    if amplitude is None:
+        return
+    for sel in sels:
+        rand = rs.randn(samples[sel].positions.shape[0], samples[sel].positions.shape[1]) * amplitude
+        samples[sel].positions += rand
+
+def _normalize(desc):
+    """Scale every frame descriptor to unit L2 norm.
+
+    Unnormalized SOAP vectors have a magnitude that tracks the overall
+    atomic density, so raw euclidean distances between frames are dominated
+    by density and composition rather than by structural differences. For a
+    fixed-composition, fixed-cell MD run that magnitude is nearly constant
+    and normalizing changes little, but as soon as several files with
+    differing composition or volume are pooled together it is what keeps FPS
+    selecting on structure. On unit vectors the distance used here is the
+    usual chordal distance of the normalized SOAP kernel,
+    sqrt(2 - 2*cos), bounded in [0, 2]. Zero rows are left untouched.
+    """
+    norms = np.linalg.norm(desc, axis=1, keepdims=True)
+    return desc / np.where(norms > 0, norms, 1.0)
+
+def _greedy_fps(desc, n, rs):
+    """Greedy max-min farthest point sampling over an (n_frames, n_features) array.
+
+    Starting from one random frame, repeatedly adds the frame whose distance
+    to its nearest already-selected neighbor is largest. `min_dist` caches
+    that nearest-selected distance for every frame, so each step costs one
+    pass over the descriptors instead of a full pairwise recompute. Selected
+    frames are parked at -1 (below any real distance, which is >= 0) so they
+    can never be picked again, even when duplicate frames make the largest
+    remaining distance 0.
+
+    Returns indices in selection order, referring to the order of `desc`.
+    """
+    first = rs.randint(len(desc))
+    sels = [first]
+    min_dist = np.linalg.norm(desc - desc[first], axis=1)
+    min_dist[first] = -1
+    for _ in range(n - 1):
+        nxt = int(np.argmax(min_dist))
+        sels.append(nxt)
+        min_dist = np.minimum(min_dist, np.linalg.norm(desc - desc[nxt], axis=1))
+        min_dist[nxt] = -1
+    return np.array(sels)
+
+def soap_descriptors(samples, rcut=5.0, nmax=8, lmax=6, sigma=0.5, normalize=True):
+    """One averaged SOAP vector per frame, shape (n_frames, n_features)."""
+    from dscribe.descriptors import SOAP
+    species = sorted(set(samples[0].get_chemical_symbols()))
+    periodic = bool(samples[0].pbc.any())
+    soap = SOAP(species=species, r_cut=rcut, n_max=nmax, l_max=lmax, sigma=sigma,
+                periodic=periodic, average="inner")
+    desc = soap.create(samples)
+    return _normalize(desc) if normalize else desc
+
 def random_sample(samples, n, seed=None, amplitude=None):
     if seed is None:
         from time import time
@@ -9,13 +67,11 @@ def random_sample(samples, n, seed=None, amplitude=None):
     rs = np.random.RandomState(seed)
     rs.shuffle(samples)
     sels = rs.choice(np.arange(0, len(samples)), n, replace=False) ## ful random
-    if amplitude is not None:
-        for sel in sels:
-            rand = rs.randn(samples[sel].positions.shape[0], samples[sel].positions.shape[1]) * amplitude
-            samples[sel].positions += rand
+    _rattle(samples, sels, rs, amplitude)
     return sels, seed
 
-def fps_sample(samples, n, seed=None, amplitude=None, rcut=5.0, nmax=8, lmax=6, sigma=0.5):
+def fps_sample(samples, n, seed=None, amplitude=None, rcut=5.0, nmax=8, lmax=6,
+               sigma=0.5, normalize=True):
     """Farthest point sampling over per-frame SOAP descriptors.
 
     Greedily grows a diverse subset by always adding the frame whose
@@ -31,28 +87,10 @@ def fps_sample(samples, n, seed=None, amplitude=None, rcut=5.0, nmax=8, lmax=6, 
         seed = int(time())
     rs = np.random.RandomState(seed)
 
-    from dscribe.descriptors import SOAP
-    species = sorted(set(samples[0].get_chemical_symbols()))
-    periodic = bool(samples[0].pbc.any())
-    soap = SOAP(species=species, r_cut=rcut, n_max=nmax, l_max=lmax, sigma=sigma,
-                periodic=periodic, average="inner")
-    desc = soap.create(samples)
-
-    first = rs.randint(len(samples))
-    sels = [first]
-    min_dist = np.linalg.norm(desc - desc[first], axis=1)
-    min_dist[first] = -1
-    for _ in range(n - 1):
-        nxt = int(np.argmax(min_dist))
-        sels.append(nxt)
-        min_dist = np.minimum(min_dist, np.linalg.norm(desc - desc[nxt], axis=1))
-        min_dist[nxt] = -1
-    sels = np.array(sels)
-
-    if amplitude is not None:
-        for sel in sels:
-            rand = rs.randn(samples[sel].positions.shape[0], samples[sel].positions.shape[1]) * amplitude
-            samples[sel].positions += rand
+    desc = soap_descriptors(samples, rcut=rcut, nmax=nmax, lmax=lmax, sigma=sigma,
+                            normalize=normalize)
+    sels = _greedy_fps(desc, n, rs)
+    _rattle(samples, sels, rs, amplitude)
     return sels, seed
 
 def main():
@@ -89,6 +127,12 @@ def main():
                              "point sampling over SOAP descriptors, for a "
                              "diverse/non-redundant subset)")
 
+    parser.add_argument("--no-normalize", dest="normalize", action="store_false",
+                        help="Do not L2-normalize the frame descriptors before FPS. "
+                             "Normalization is on by default so distances measure "
+                             "structural difference rather than descriptor magnitude "
+                             "(only used with --method fps)")
+
     parser.add_argument("--soap-rcut", required=False, default=5.0, type=float,
                         help="SOAP cutoff radius in Angstrom (only used with --method fps)")
 
@@ -102,7 +146,7 @@ def main():
                         help="SOAP Gaussian width sigma (only used with --method fps)")
 
     args = parser.parse_args()
-    
+
     from ase.io import read, write
 
     samples = []
@@ -118,7 +162,8 @@ def main():
     else:
         sels, args.seed = fps_sample(samples, args.samples, seed=args.seed, amplitude=args.amplitude,
                                       rcut=args.soap_rcut, nmax=args.soap_nmax,
-                                      lmax=args.soap_lmax, sigma=args.soap_sigma)
+                                      lmax=args.soap_lmax, sigma=args.soap_sigma,
+                                      normalize=args.normalize)
 
     print(f'Removing {args.outfolder}*/')
     print('Using seed: ', args.seed)

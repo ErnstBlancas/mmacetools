@@ -1,4 +1,8 @@
 import numpy as np
+from ase.io import read, write
+
+
+
 
 def check_first(line):
     if '#' in line.split()[0]:
@@ -36,13 +40,8 @@ def read_aims_in(fin, flabel):
         pos = np.array([np.linalg.inv(cell.T)@zz for zz in pos])
     return cell, pos, atoms, fidx
 
-cell, pos, atoms, _ = read_aims_in('super.in', 'shit')
+#cell, pos, atoms, _ = read_aims_in('super.in', 'shit')
 
-#def parse_lammps_format(fout, cell, atoms):
-#    fout = open(fout, 'w')
-#    n = len(atoms)
-#
-#
-#
-#    fout.write("## Lammps data file XRA by Erni\n")
-#    fout.write("## Lammps data file XRA by Erni\n")
+fin = read('super.in')
+fout = write('lammps.geo', fin, format='lammps-data')
+

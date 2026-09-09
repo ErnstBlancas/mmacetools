@@ -16,6 +16,7 @@ diversity-based farthest point sampling (FPS) over SOAP descriptors.
 | `--amplitude` | `None` | Std. dev. (Å) of Gaussian noise added to positions of the selected frames ("rattle"); disabled when unset |
 | `--seed` | `None` | RNG seed; a time-based seed is used and printed when left unset |
 | `--method` | `random` | Selection method: `random` or `fps` (see below) |
+| `--no-normalize` | off (i.e. normalize) | Disable L2-normalization of the frame descriptors before FPS; only used with `--method fps` |
 | `--soap-rcut` | `5.0` | SOAP cutoff radius (Å), only used with `--method fps` |
 | `--soap-nmax` | `8` | SOAP `n_max`, only used with `--method fps` |
 | `--soap-lmax` | `6` | SOAP `l_max`, only used with `--method fps` |
@@ -43,6 +44,33 @@ the number of available frames.
 Note: unlike `random`, which returns indices into the internally shuffled
 list, `fps_sample()` returns indices in *selection order*, referring to the
 original (unshuffled) frame ordering.
+
+### Shared internals
+
+The selection itself lives in `_greedy_fps()`, which works on any
+`(n_frames, n_features)` descriptor array. Descriptor construction is
+exposed separately as `soap_descriptors()` if you want the vectors
+themselves.
+
+### Descriptor normalization
+
+`fps` L2-normalizes the per-frame descriptor to a unit vector before
+selecting (`_normalize()`), unless `--no-normalize` is given.
+
+Raw SOAP vectors have a magnitude that tracks the overall atomic
+density, so unnormalized euclidean distances between frames are driven by
+density and composition rather than by structural difference. For a single
+fixed-composition, fixed-cell MD run that magnitude is nearly constant and
+normalization changes the selection only slightly; but `--path` pools all
+frames from all the files given, so as soon as trajectories with differing
+composition or cell volume are mixed, normalization is what keeps FPS
+selecting on structure instead of on descriptor size. On unit vectors the
+distance used is the usual chordal distance of the normalized SOAP
+kernel, `sqrt(2 - 2*cos)`, bounded in `[0, 2]`.
+
+Note that this changes which frames are chosen relative to earlier
+(unnormalized) runs at the same seed; pass `--no-normalize` to reproduce
+the old behaviour.
 
 ## Amplitude / rattle
 

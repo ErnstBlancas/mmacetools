@@ -12,9 +12,11 @@ and reports, averaged over several seeds:
     i.e. better coverage of configuration space) and the energy range
     (eV/atom) spanned by the subset
 
-Quality metrics reuse one descriptor set precomputed once up front, kept
-separate from the timings above so descriptor cost isn't double-counted
-there.
+Quality metrics reuse one descriptor set precomputed once up front via
+randomsample.soap_descriptors() -- the same helper (and hence the same
+L2-normalized descriptor space) the selection itself uses, so the metric
+measures what FPS actually optimizes. It is kept separate from the timings
+above so descriptor cost isn't double-counted there.
 """
 import importlib.util
 import sys
@@ -55,15 +57,6 @@ def load_trajectory():
     for i, atoms in enumerate(frames):
         atoms.info['orig_idx'] = i
     return frames
-
-
-def soap_descriptors(frames, rcut, nmax, lmax, sigma):
-    from dscribe.descriptors import SOAP
-    species = sorted(set(frames[0].get_chemical_symbols()))
-    periodic = bool(frames[0].pbc.any())
-    soap = SOAP(species=species, r_cut=rcut, n_max=nmax, l_max=lmax,
-                sigma=sigma, periodic=periodic, average="inner")
-    return soap.create(frames)
 
 
 def write_selection(frames, orig_idx, method, n, seed):
@@ -109,7 +102,7 @@ def benchmark():
     print("Precomputing SOAP descriptors for the diversity/energy-range "
           "metrics (kept separate from the timings below)...")
     t0 = time.perf_counter()
-    desc = soap_descriptors(frames, **soap_kwargs)
+    desc = randomsample.soap_descriptors(frames, **soap_kwargs)
     print(f"  done in {time.perf_counter() - t0:.2f}s\n")
 
     results = []
