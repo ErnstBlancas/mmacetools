@@ -17,10 +17,11 @@ diversity-based farthest point sampling (FPS) over SOAP descriptors.
 | `--seed` | `None` | RNG seed; a time-based seed is used and printed when left unset |
 | `--method` | `random` | Selection method: `random` or `fps` (see below) |
 | `--no-normalize` | off (i.e. normalize) | Disable L2-normalization of the frame descriptors before FPS; only used with `--method fps` |
-| `--soap-rcut` | `5.0` | SOAP cutoff radius (Å), only used with `--method fps` |
-| `--soap-nmax` | `8` | SOAP `n_max`, only used with `--method fps` |
-| `--soap-lmax` | `6` | SOAP `l_max`, only used with `--method fps` |
-| `--soap-sigma` | `0.5` | SOAP Gaussian width `sigma`, only used with `--method fps` |
+| `--soap-rcut` | `5.0` | SOAP cutoff radius (Å); one value, or two to combine two descriptors. Only used with `--method fps` |
+| `--soap-nmax` | `8` | SOAP `n_max`; one value, or one per descriptor. Only used with `--method fps` |
+| `--soap-lmax` | `6` | SOAP `l_max`; one value, or one per descriptor. Only used with `--method fps` |
+| `--soap-sigma` | `0.5` | SOAP Gaussian width `sigma`; one value, or one per descriptor. Only used with `--method fps` |
+| `--soap-weight` | `0.5` | Share of the squared FPS distance carried by the first descriptor when two are given. Ignored with a single descriptor |
 
 ## Selection methods
 
@@ -51,6 +52,44 @@ The selection itself lives in `_greedy_fps()`, which works on any
 `(n_frames, n_features)` descriptor array. Descriptor construction is
 exposed separately as `soap_descriptors()` if you want the vectors
 themselves.
+
+### Combining two SOAP descriptors
+
+A single cutoff has to serve two jobs at once: `r_cut` small enough to
+resolve conformation inside a molecule, and large enough to see how
+molecules pack around each other. Giving two values to any of the four
+`--soap-*` options builds two SOAP descriptors and concatenates them, so
+FPS sees both length scales:
+
+```sh
+xyzgen/randomsample -i md.xyz -n 5 --method fps \
+    --soap-rcut 3.0 7.0 --soap-nmax 6 4 --soap-lmax 4 3 --soap-sigma 0.3 0.6
+```
+
+Options given once are shared by both descriptors, so
+`--soap-rcut 3.0 7.0 --soap-nmax 6` is a legal shorthand for two
+descriptors that differ only in cutoff. More than two is rejected.
+
+The two blocks are put on a common footing before being joined: each is
+L2-normalized per frame, then divided by its own RMS pairwise distance
+(`_block_scale()`), then scaled by `sqrt(w)` and `sqrt(1-w)`. **That
+rescaling is not cosmetic.** How far a SOAP descriptor moves over a
+trajectory depends strongly on its cutoff — across a short/long pair the
+typical distance can differ by 4x, i.e. 15x in squared distance — so a
+plain concatenation is silently dominated by one block and reproduces its
+selection exactly, making the second descriptor a pure waste of CPU.
+After the rescaling the squared distance is
+
+```
+d^2 = w * d1^2 + (1 - w) * d2^2
+```
+
+on the standardized per-block distances, so `--soap-weight` reads directly
+as the fraction of the FPS distance contributed by the first descriptor,
+and the default `0.5` really is an even split.
+
+With a single descriptor none of this happens and the result is bit-identical
+to earlier versions.
 
 ### Descriptor normalization
 
@@ -110,6 +149,12 @@ xyzgen/randomsample -i md.xyz -n 10 -o sample -f aims
 # plus 0.01 Å rattle noise for extra diversity
 xyzgen/randomsample -i md.xyz -n 20 --method fps \
     --soap-rcut 6.0 --soap-nmax 6 --soap-lmax 4 --amplitude 0.01
+
+# Two-scale FPS: one descriptor for intramolecular geometry, one for
+# packing, contributing equally to the FPS distance
+xyzgen/randomsample -i md.xyz -n 5 --method fps \
+    --soap-rcut 3.0 7.0 --soap-nmax 6 4 --soap-lmax 4 3 \
+    --soap-sigma 0.3 0.6 --soap-weight 0.5
 ```
 
 ## Benchmarking `random` vs `fps`

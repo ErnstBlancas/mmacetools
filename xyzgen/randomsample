@@ -50,14 +50,95 @@ def _greedy_fps(desc, n, rs):
         min_dist[nxt] = -1
     return np.array(sels)
 
-def soap_descriptors(samples, rcut=5.0, nmax=8, lmax=6, sigma=0.5, normalize=True):
+def _block_scale(desc):
+    """RMS distance between two random rows of `desc`, computed in O(N*D).
+
+    Concatenating two SOAP blocks only balances them if both are first put
+    on a common distance scale: the mean squared pairwise distance of a
+    block is set by how much that particular cutoff makes the descriptor
+    move over the trajectory, and across a short-range/long-range pair it
+    differs by an order of magnitude. Without this, the block with the
+    larger spread wins every FPS comparison and the pair degenerates to a
+    single descriptor (verified: an unscaled r3.0 + r8.0 concatenation
+    reproduces the r3.0 selection exactly).
+
+    Expanding mean_ij |x_i - x_j|^2 = 2*(mean_i |x_i|^2 - |mean_i x_i|^2)
+    avoids ever forming the N x N distance matrix; the N/(N-1) factor makes
+    it the mean over distinct pairs rather than over all ordered pairs.
+    """
+    n = len(desc)
+    if n < 2:
+        return 1.0
+    mu = desc.mean(axis=0)
+    var = float((desc * desc).sum(axis=1).mean() - mu @ mu)
+    scale = np.sqrt(max(var, 0.0) * 2.0 * n / (n - 1))
+    return float(scale) if scale > 0 else 1.0
+
+def _as_blocks(rcut, nmax, lmax, sigma):
+    """Broadcast the four SOAP settings into a list of per-block dicts.
+
+    Each setting may be a scalar or a sequence. The number of blocks is the
+    longest of the four; a setting given once is shared by every block, so
+    `--soap-rcut 3.0 7.0 --soap-nmax 6` means two blocks that differ only in
+    cutoff. Any other length is ambiguous and rejected rather than guessed.
+    """
+    vals = {'rcut': rcut, 'nmax': nmax, 'lmax': lmax, 'sigma': sigma}
+    seqs = {k: list(v) if isinstance(v, (list, tuple, np.ndarray)) else [v]
+            for k, v in vals.items()}
+    nblocks = max(len(v) for v in seqs.values())
+    if nblocks > 2:
+        over = ', '.join(f"--soap-{k} ({len(v)} values)"
+                         for k, v in seqs.items() if len(v) > 2)
+        raise ValueError(f"at most 2 SOAP descriptors are supported: {over}")
+    for k, v in seqs.items():
+        if len(v) not in (1, nblocks):
+            raise ValueError(f"--soap-{k} takes 1 or {nblocks} values, got {len(v)}")
+    return [{k: (v[i] if len(v) > 1 else v[0]) for k, v in seqs.items()}
+            for i in range(nblocks)]
+
+def _soap_block(samples, rcut, nmax, lmax, sigma):
     """One averaged SOAP vector per frame, shape (n_frames, n_features)."""
     from dscribe.descriptors import SOAP
     species = sorted(set(samples[0].get_chemical_symbols()))
     periodic = bool(samples[0].pbc.any())
     soap = SOAP(species=species, r_cut=rcut, n_max=nmax, l_max=lmax, sigma=sigma,
                 periodic=periodic, average="inner")
-    desc = soap.create(samples)
+    return soap.create(samples)
+
+def soap_descriptors(samples, rcut=5.0, nmax=8, lmax=6, sigma=0.5, normalize=True,
+                     weight=0.5):
+    """Per-frame descriptors from one or two SOAP blocks.
+
+    With scalar settings this is a single SOAP descriptor and behaves
+    exactly as before. When any of rcut/nmax/lmax/sigma is given as a pair,
+    two SOAP descriptors are built and concatenated, which lets FPS see two
+    length scales at once -- typically one cutoff inside a molecule and one
+    reaching its neighbours, which a single cutoff has to trade off against
+    each other.
+
+    The two blocks are made comparable before joining: each is L2-normalized
+    per frame, then divided by its own RMS pairwise distance (`_block_scale`),
+    then scaled by sqrt(weight) and sqrt(1-weight). Because the blocks are
+    orthogonal coordinates of the joint vector, the squared distance is
+    weight*d1^2 + (1-weight)*d2^2 on those standardized distances, so
+    `weight` reads directly as the share of the FPS distance carried by the
+    first block, and 0.5 really is an even split.
+    """
+    blocks = _as_blocks(rcut, nmax, lmax, sigma)
+    if len(blocks) == 1:
+        desc = _soap_block(samples, **blocks[0])
+        return _normalize(desc) if normalize else desc
+
+    if not 0.0 <= weight <= 1.0:
+        raise ValueError(f"--soap-weight must be in [0, 1], got {weight}")
+    shares = (weight, 1.0 - weight)
+    parts = []
+    for block, share in zip(blocks, shares):
+        desc = _soap_block(samples, **block)
+        if normalize:
+            desc = _normalize(desc)
+        parts.append(desc * (np.sqrt(share) / _block_scale(desc)))
+    desc = np.hstack(parts)
     return _normalize(desc) if normalize else desc
 
 def random_sample(samples, n, seed=None, amplitude=None):
@@ -71,7 +152,7 @@ def random_sample(samples, n, seed=None, amplitude=None):
     return sels, seed
 
 def fps_sample(samples, n, seed=None, amplitude=None, rcut=5.0, nmax=8, lmax=6,
-               sigma=0.5, normalize=True):
+               sigma=0.5, normalize=True, weight=0.5):
     """Farthest point sampling over per-frame SOAP descriptors.
 
     Greedily grows a diverse subset by always adding the frame whose
@@ -88,7 +169,7 @@ def fps_sample(samples, n, seed=None, amplitude=None, rcut=5.0, nmax=8, lmax=6,
     rs = np.random.RandomState(seed)
 
     desc = soap_descriptors(samples, rcut=rcut, nmax=nmax, lmax=lmax, sigma=sigma,
-                            normalize=normalize)
+                            normalize=normalize, weight=weight)
     sels = _greedy_fps(desc, n, rs)
     _rattle(samples, sels, rs, amplitude)
     return sels, seed
@@ -133,17 +214,34 @@ def main():
                              "structural difference rather than descriptor magnitude "
                              "(only used with --method fps)")
 
-    parser.add_argument("--soap-rcut", required=False, default=5.0, type=float,
-                        help="SOAP cutoff radius in Angstrom (only used with --method fps)")
+    parser.add_argument("--soap-rcut", required=False, default=[5.0], type=float,
+                        nargs="+", metavar="R",
+                        help="SOAP cutoff radius in Angstrom (only used with --method fps). "
+                             "Give two values to build two SOAP descriptors and concatenate "
+                             "them, e.g. --soap-rcut 3.0 7.0 to combine an intramolecular "
+                             "and a packing length scale")
 
-    parser.add_argument("--soap-nmax", required=False, default=8, type=int,
-                        help="SOAP n_max (only used with --method fps)")
+    parser.add_argument("--soap-nmax", required=False, default=[8], type=int,
+                        nargs="+", metavar="N",
+                        help="SOAP n_max defines the maximum number of radial "
+                        "basis functions used to expand the local atomic "
+                        "density, usually between 2 and 12")
 
-    parser.add_argument("--soap-lmax", required=False, default=6, type=int,
-                        help="SOAP l_max (only used with --method fps)")
+    parser.add_argument("--soap-lmax", required=False, default=[6], type=int,
+                        nargs="+", metavar="L",
+                        help="SOAP l_max, defines the maximum angular degree of "
+                        "the spherical harmonics used to expand the local atomic "
+                        "environment, usually between 6 and 8 is acceptable")
 
-    parser.add_argument("--soap-sigma", required=False, default=0.5, type=float,
-                        help="SOAP Gaussian width sigma (only used with --method fps)")
+    parser.add_argument("--soap-sigma", required=False, default=[0.5], type=float,
+                        nargs="+", metavar="S",
+                        help="SOAP Gaussian width sigma, usally between 0.3 and 0.5 ang")
+
+    parser.add_argument("--soap-weight", required=False, default=0.5, type=float,
+                        metavar="W",
+                        help="Share of the squared FPS distance carried by the first SOAP "
+                             "descriptor when two are given, in [0, 1] (default: 0.5, an "
+                             "even split). Ignored with a single descriptor")
 
     args = parser.parse_args()
 
@@ -163,7 +261,7 @@ def main():
         sels, args.seed = fps_sample(samples, args.samples, seed=args.seed, amplitude=args.amplitude,
                                       rcut=args.soap_rcut, nmax=args.soap_nmax,
                                       lmax=args.soap_lmax, sigma=args.soap_sigma,
-                                      normalize=args.normalize)
+                                      normalize=args.normalize, weight=args.soap_weight)
 
     print(f'Removing {args.outfolder}*/')
     print('Using seed: ', args.seed)
@@ -173,7 +271,11 @@ def main():
         path = f'{args.outfolder}-{cc:03d}'
         os.mkdir(path)
         write(f'{path}/{path}.in', samples[sel],format=args.format)
-        os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel} Amplitude: {args.amplitude} (ang)/' {path}/{path}.in")
+        if args.method == "random":
+            os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel} Amplitude: {args.amplitude} (ang)/' {path}/{path}.in")
+        elif args.method == "fps":
+            os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel} FPS: r_cut={args.soap_rcut}(ang) sigma={args.soap_sigma}(ang) n_max={args.soap_nmax} l_max={args.soap_lmax}' {path}/{path}.in")
+
         cc+=1
 
 if __name__ == "__main__":
