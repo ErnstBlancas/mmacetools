@@ -274,7 +274,7 @@ def main():
         if args.method == "random":
             os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel} Amplitude: {args.amplitude} (ang)/' {path}/{path}.in")
         elif args.method == "fps":
-            os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapshot: {sel} FPS: r_cut={args.soap_rcut}(ang) sigma={args.soap_sigma}(ang) n_max={args.soap_nmax} l_max={args.soap_lmax}' {path}/{path}.in")
+            os.system(f"sed -i -e '3s/^$/# Seed: {args.seed} Snapsh\t: {sel} FPS: r_cut={args.soap_rcut}(ang) sigma={args.soap_sigma}(ang) n_max={args.soap_nmax} l_max={args.soap_lmax}/' {path}/{path}.in")
 
         cc+=1
 
