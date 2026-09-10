@@ -1,3 +1,8 @@
+This directory holds the two tools that build MACE training sets:
+[`randomsample`](#randomsample) picks frames out of an MD trajectory, and
+[`aimsout2xyz`](#aimsout2xyz) turns the resulting FHI-AIMS outputs into
+extended XYZ.
+
 # randomsample
 
 Sample geometries from an ASE-readable MD trajectory (or any ASE-readable
@@ -165,3 +170,73 @@ across a few sample sizes and seeds, and reports selection wall-clock time
 alongside two quality metrics: mean/min pairwise SOAP-descriptor distance
 among the selected frames (higher = more diverse) and the energy range
 (eV/atom) spanned by the subset.
+
+# aimsout2xyz
+
+Turn FHI-AIMS outputs into an extended XYZ dataset for MACE. Reads energy,
+positions, forces and (when present) the analytical stress tensor, and writes
+them with the keys `energy_dft` / `forces_dft` / `stress` that
+`multitrain/multimace.py` expects.
+
+## Arguments
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--files`, `-i` | required | One or more FHI-AIMS output files |
+| `--fout`, `-o` | `aims_output` | Output name prefix (`<fout>.xyz`, or `<fout>.train.xyz` / `<fout>.test.xyz` with `--fraction`) |
+| `--fraction`, `-f` | `None` | Split into a train and a test set; the value is the **test** share, given either as a fraction (`0.2`) or a percentage (`20`). Without it everything goes into one file |
+| `--isolated`, `-iso` | `None` | FHI-AIMS outputs of isolated atoms; written as `config_type=IsolatedAtom` frames (the E0s references) at the top of the training set |
+| `--seed` | `None` | RNG seed for the train-test shuffle; a time-based seed is used and printed when left unset. Only used with `--fraction` |
+| `--no-shuffle` | off (i.e. shuffle) | Split in the order the files were given instead of shuffling. Only used with `--fraction` |
+
+## What gets extracted
+
+One frame per converged SCF cycle, so a single-point run gives one frame and a
+relaxation gives one per relaxation step, each with the geometry that produced
+that energy and those forces.
+
+`Final atomic structure:` is deliberately ignored: AIMS repeats there the
+geometry of the last relaxation step, which has already been collected from
+`Updated atomic structure:` (or from the input geometry, when the relaxation
+converged straight away). Counting it would give one geometry more than there
+are energies.
+
+Stress is written only when the run computed it. The sign convention is the one
+AIMS prints, which is also ASE's (`stress` is σ, so the pressure is `-tr(σ)/3`).
+
+## Train-test split
+
+The file list is shuffled before being cut, so the two sets are a random draw
+rather than the head and tail of the input order. Pass `--seed` to make the
+draw reproducible, or `--no-shuffle` to keep the given order — with sorted
+input that turns the test set into a whole-polymorph holdout, which measures
+something quite different from a random split.
+
+The split is over *files*, not frames: every structure from one relaxation stays
+on the same side, which is what you want, since consecutive relaxation steps are
+nearly identical and would otherwise leak between the sets.
+
+## Incomplete runs
+
+An output that never finished (no energy, no forces, truncated mid-file) is
+reported on stderr and left out, and the remaining files are still written, so
+one dead job does not cost you the whole dataset. The exit status is non-zero
+whenever anything was skipped, so a pipeline notices. The counts of geometries,
+force blocks and energies are compared for every file, and any disagreement is
+reported rather than silently paired up.
+
+Output files are truncated on open, so re-running a command overwrites its
+dataset instead of appending a second copy to it.
+
+## Examples
+
+```sh
+# Single dataset from a directory of single-point runs
+xyzgen/aimsout2xyz -i benchmark/extract/*/*/*.out -o formII
+
+# 20% test split, reproducible, with the isolated-atom references
+xyzgen/aimsout2xyz -i dft/*/*.out -iso iso/{H,C,N}.out -o formII -f 20 --seed 42
+
+# Keep the input order (e.g. a deliberate holdout of the last polymorphs)
+xyzgen/aimsout2xyz -i $(ls -d dft/*/*.out) -o formII -f 20 --no-shuffle
+```

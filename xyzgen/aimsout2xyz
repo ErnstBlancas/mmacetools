@@ -1,14 +1,24 @@
 #!/usr/bin/python
 import numpy as np
-from glob import glob
+from time import time
 import os
+import sys
 import argparse
 
+
+class AimsParseError(Exception):
+    """Raised when an FHI-AIMS output can't be turned into structures."""
+
+
+def warn(msg):
+    print(f"WARNING: {msg}", file=sys.stderr)
+
+
 def read_aimsout(name):
-    fin = open(name,'r')
+    fin = open(name, 'r')
     cell, pos, forces, atoms, energies = [], [], [], [], []
-    isstress = False
     stress = []
+    nat = None
     for line in fin:
         if 'Input geometry:' in line:
             celdum = []
@@ -31,6 +41,8 @@ def read_aimsout(name):
             nat = int(line.split()[5])
     
         elif ' Total atomic forces' in line:
+            if nat is None:
+                raise AimsParseError("forces found before the atom count")
             fordum = []
             for i in range(nat):
                 fordum.append([np.float64(zz) for zz in fin.readline().split()[2:]])
@@ -40,6 +52,8 @@ def read_aimsout(name):
             energies.append(np.float64(line.split()[5]))
 
         elif 'Updated atomic structure:' in line:
+            if nat is None:
+                raise AimsParseError("geometry update found before the atom count")
             fin.readline() # skip one line
             celdum, posdum = [], []
             for i in range(3):
@@ -50,18 +64,13 @@ def read_aimsout(name):
                 posdum.append([np.float64(zz) for zz in fin.readline().split()[1:4]])
             pos.append(np.array(posdum))
 
-        elif 'Final atomic structure:' in line:
-            fin.readline() # skip one line
-            celdum, posdum = [], []
-            for i in range(3):
-                celdum.append([np.float64(zz) for zz in fin.readline().split()[1:]])
-            cell.append(np.array(celdum))
-            fin.readline() # skip one line
-            for i in range(nat):
-                posdum.append([np.float64(zz) for zz in fin.readline().split()[1:4]])
-            pos.append(np.array(posdum))
+        # 'Final atomic structure:' is deliberately not parsed: AIMS repeats
+        # there the geometry of the last relaxation step, which has already
+        # been collected (from 'Updated atomic structure:', or from the input
+        # geometry when the relaxation converged straight away). Reading it
+        # would append one geometry more than there are energies and forces.
+
         elif 'Analytical stress tensor - Symmetrized' in line:
-            isstress = True
             stresdum = []
             for i in range(4):
                 fin.readline()
@@ -69,12 +78,39 @@ def read_aimsout(name):
                 stresdum.append([np.float64(zz) for zz in fin.readline().split()[2:5]])
             stress.append(np.array(stresdum))
     fin.close()
-    return np.array(cell), np.array(pos), np.array(forces), atoms, nat, np.array(energies), np.array(stress)
 
+    if nat is None:
+        raise AimsParseError("no atom count found (incomplete output?)")
+    if len(atoms) != nat:
+        raise AimsParseError(f"input geometry has {len(atoms)} atoms, header says {nat}")
+
+    nframes = reconcile(name, cell, forces, energies)
+    if nframes == 0:
+        raise AimsParseError("no complete geometry/forces/energy set found "
+                             "(the run probably did not finish)")
+    if len(stress) and len(stress) < nframes:
+        warn(f"{name}: stress found for only {len(stress)} of {nframes} "
+             "structures; writing them without stress")
+        stress = []
+
+    return (np.array(cell[:nframes]), np.array(pos[:nframes]),
+            np.array(forces[:nframes]), atoms, nat,
+            np.array(energies[:nframes]), np.array(stress[:nframes]))
+
+
+def reconcile(name, cell, forces, energies):
+    """Number of structures that have a geometry, forces and an energy."""
+    nframes = min(len(cell), len(forces), len(energies))
+    if len(set([len(cell), len(forces), len(energies)])) != 1:
+        warn(f"{name}: geometries={len(cell)}, forces={len(forces)}, "
+             f"energies={len(energies)} do not match; keeping the first "
+             f"{nframes}")
+    return nframes
 
 
 def read_aimsout_isolated(name):
-    fin = open(name,'r')
+    fin = open(name, 'r')
+    atom, energy = None, None
     for line in fin:
         if 'Atomic structure:' in line:
             fin.readline() # skip one
@@ -83,37 +119,68 @@ def read_aimsout_isolated(name):
         elif "Total energy uncorrected" in line:
             energy = np.float64(line.split()[5])
     fin.close()
+    if atom is None:
+        raise AimsParseError("no atomic structure found")
+    if energy is None:
+        raise AimsParseError("no total energy found (the run probably did not finish)")
     return atom, energy
 
+
 def write_isolated(fout, energy, atom, label=None):
-    fout = open(fout, 'w')
-    first_line = f'Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc="F F F" energy_dft={energy:12.8f} name={label} config_type=IsolatedAtom'
+    first_line = (f'Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc="F F F" '
+                  f'energy_dft={energy:12.8f} name="{label}" config_type=IsolatedAtom')
     print("1", file=fout)
     print(first_line, file=fout)
     print(f"{atom} 0.0 0.0 0.0 0.0 0.0 0.0", file=fout)
-    fout.close()
 
 
-
-def write_xyz(fname, nat, atn, cells, positions, forces, energy, stress, pbc='T T T', label=None):
-    isstress=False
-    fout = open(fname, 'w')
-    if len(stress) > 0:
-        isstress=True
+def write_xyz(fout, nat, atn, cells, positions, forces, energy, stress, pbc='T T T', label=None):
+    isstress = len(stress) > 0
     for idx, cell in enumerate(cells):
         print(nat, file=fout)
         lat = " ".join([f'{zz:12.8f}' for zz in cell.flatten()])
         if isstress:
             lstress=" ".join([f'{zz:12.8f}' for zz in stress[idx].flatten()])
-            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name={label}'
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} stress=\"{lstress}\" name=\"{label}\"'
         else:
-            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name={label}'
+            first_line = f'Lattice=\"{lat}\" Properties=species:S:1:pos:R:3:forces_dft:R:3 pbc=\"{pbc}\" energy_dft={energy[idx]:12.8f} name=\"{label}\"'
         print(first_line, file=fout)
         for i in range(nat):
             pp = " ".join([f'{zz:12.8f}' for zz in positions[idx][i]]) 
             ff = " ".join([f'{zz:12.8f}' for zz in forces[idx][i]]) 
             print(f'{atn[i]:4} {pp} {ff}', file=fout)
-    fout.close()
+
+
+def dump_isolated(fout, paths, skipped):
+    """Append the isolated-atom references; returns how many were written."""
+    nwritten = 0
+    for i in paths:
+        try:
+            atom, energy = read_aimsout_isolated(i)
+        except (AimsParseError, IndexError, ValueError) as exc:
+            warn(f"{i}: skipped ({exc})")
+            skipped.append(i)
+            continue
+        write_isolated(fout, energy, atom, label=i)
+        nwritten += 1
+    return nwritten
+
+
+def dump_structures(fout, paths, skipped):
+    """Append every structure found in paths; returns how many were written."""
+    nwritten = 0
+    for i in paths:
+        try:
+            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(i)
+        except (AimsParseError, IndexError, ValueError) as exc:
+            warn(f"{i}: skipped ({exc})")
+            skipped.append(i)
+            continue
+        write_xyz(fout, nat, atoms, cell, pos, forces, energy, stress,
+                  pbc='T T T', label=i)
+        nwritten += len(cell)
+    return nwritten
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -134,65 +201,75 @@ def main():
     parser.add_argument("--isolated", "-iso", nargs="+", default=None,
                         help="Path to FHI-AIMS outputs with isolatedAtoms", required=False)
 
+    parser.add_argument("--seed", type=int, default=None, required=False,
+                        help="RNG seed for the train-test shuffle; only used with --fraction")
+
+    parser.add_argument("--no-shuffle", dest="shuffle", action="store_false",
+                        help="Split in the order the files were given instead of shuffling")
+
     args = parser.parse_args()
-    
-    if args.fraction:
-        if  1 < args.fraction < 100:
+    skipped = []
+
+    if args.fraction is not None:
+        if 1 < args.fraction < 100:
             args.fraction = args.fraction / 100
-        if args.fraction >= 100:
-            print("Train-Test fraction can't be greater than 100/1")
-            exit()
+        if not 0 < args.fraction < 1:
+            print("Train-Test fraction must be inside 0-1 (or 1-100), "
+                  "exclusive: both sets have to be non empty", file=sys.stderr)
+            sys.exit(1)
 
         ftrain = args.fout +".train.xyz"
-        if os.path.isfile(ftrain): 
-            os.remove(ftrain)
         ftest= args.fout +".test.xyz"
-        if os.path.isfile(ftest): 
-            os.remove(ftest)
 
-        nfiles = len(args.files)
+        files = list(args.files)
+        nfiles = len(files)
         ntest = round(nfiles *args.fraction)
         ntrain = nfiles - ntest
-        print("Trainig set:", ftrain, " nstructures: ",ntrain)
-        print("Test set:", ftrain, " nstructures: ",ntest)
+        if ntest == 0 or ntrain == 0:
+            print(f"Train-Test fraction {args.fraction} leaves one of the sets "
+                  f"empty for {nfiles} file(s)", file=sys.stderr)
+            sys.exit(1)
+
         ## randon shuffle the in files
-        if args.isolated is not None:
-            for i in args.isolated:
-                atom, energy = read_aimsout_isolated(i)
-                write_isolated('tmp.xyz', energy, atom, label=i)
-                os.system(f'cat tmp.xyz >> {ftrain}')
+        if args.shuffle:
+            if args.seed is None:
+                args.seed = int(time())
+            np.random.RandomState(args.seed).shuffle(files)
+            print("Shuffle seed:", args.seed, flush=True)
 
-        for i in range(ntrain):
-            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
-            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
-                      pbc='T T T', label=args.files[i])
-            os.system(f'cat tmp.xyz >> {ftrain}')
+        print("Trainig set:", ftrain, " nfiles: ", ntrain, flush=True)
+        print("Test set:", ftest, " nfiles: ", ntest, flush=True)
 
-        for i in range(ntrain, ntrain+ntest):
-            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
-            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
-                      pbc='T T T', label=args.files[i])
-            os.system(f'cat tmp.xyz >> {ftest}')
+        with open(ftrain, 'w') as fout:
+            ntrainw = 0
+            if args.isolated is not None:
+                ntrainw += dump_isolated(fout, args.isolated, skipped)
+            ntrainw += dump_structures(fout, files[:ntrain], skipped)
+        with open(ftest, 'w') as fout:
+            ntestw = dump_structures(fout, files[ntrain:], skipped)
+        nwritten = ntrainw + ntestw
+        print(f"Wrote {ntrainw} structures to {ftrain} "
+              f"and {ntestw} to {ftest}")
     else:
+        fxyz = args.fout +".xyz"
         nfiles = len(args.files)
-        print("Dataset:", args.fout +".xyz", " nstructures: ", nfiles)
-        if args.isolated is not None:
-            for i in args.isolated:
-                atom, energy = read_aimsout_isolated(i)
-                write_isolated('tmp.xyz', energy, atom, label=i)
-                os.system(f'cat tmp.xyz >> {ftrain}')
+        print("Dataset:", fxyz, " nfiles: ", nfiles, flush=True)
+        with open(fxyz, 'w') as fout:
+            nwritten = 0
+            if args.isolated is not None:
+                nwritten += dump_isolated(fout, args.isolated, skipped)
+            nwritten += dump_structures(fout, args.files, skipped)
+        print(f"Wrote {nwritten} structures to {fxyz}")
 
-        for i in range(nfiles):
-            cell, pos, forces, atoms, nat, energy, stress = read_aimsout(args.files[i])
-            write_xyz('tmp.xyz', nat, atoms, cell, pos, forces, energy, stress,
-                      pbc='T T T', label=args.files[i])
-            os.system(f'cat tmp.xyz >> {args.fout}.xyz')
+    if skipped:
+        warn(f"{len(skipped)} of {nfiles + len(args.isolated or [])} file(s) "
+             "could not be read and are missing from the output: "
+             + ", ".join(skipped))
+        sys.exit(1)
+    if nwritten == 0:
+        print("No structures written", file=sys.stderr)
+        sys.exit(1)
 
-    os.remove('tmp.xyz')
-
-
-
-        
 
 if __name__ == "__main__":
     main()
