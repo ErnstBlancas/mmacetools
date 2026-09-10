@@ -1,4 +1,4 @@
-import os, glob, logging, sys, warnings, time
+import os, glob, logging, random, shutil, sys, warnings
 from multiprocessing import Process
 from ase.io import read, write
 import numpy as np
@@ -10,7 +10,7 @@ nmax = 256               ## max number of core
 ncore_per_task0 = 2     ## to run nmax//ncore_per_task0 initial seeds
 nlast = 8               ## run nmax//nlast best models with more epochs
 max_epochs = [2, 20]   ## max_epochs for the best seeds
-use = 'force'           ## best model: force='rmse_f', energy='rmse_e_per_atom', loss='loss'
+use = 'force'           ## best model: force, energy, loss, stress (see metrics)
 worst = True            ## if true train nlast-1 models and the worst performing one
 config = {              ## or read corresponding config.yaml
           'model_dir': 'models',
@@ -45,45 +45,62 @@ fraction = 0.8          ## dftsources use for training
 clean = True            ## remove not valid seeds files
 ############################################### 
 
+## selection criterion -> metric key logged in results-*.txt.  'stress' is only
+## reported when mace computes it, i.e. with loss stress/huber/universal
+metrics = {'force': 'rmse_f',
+           'energy': 'rmse_e_per_atom',
+           'loss': 'loss',
+           'stress': 'rmse_stress'}
+
 def process_results(path, nlast, use, worst=None):
     import json
-    files = glob.glob(path)
-    stats = np.zeros((len(files), 3))
-    cc = 0
-    for f in files:
-        fin = open(f, 'r').readlines()
-        res = json.loads(fin[-1])
-        stats[cc] = np.array([res['loss'],res['rmse_e_per_atom'],res['rmse_f']])
-        cc += 1
-    if use == 'force':
-        best = np.argpartition(stats[:, 2],nlast)
-    elif use == 'energy':
-        best = np.argpartition(stats[:, 1],nlast)
-    elif use =='loss':
-        best = np.argpartition(stats[:, 0],nlast)
-
+    if use not in metrics:
+        raise ValueError(f"unknown criterion '{use}', use one of {sorted(metrics)}")
+    key = metrics[use]
+    files, values = [], []
+    for f in sorted(glob.glob(path)):
+        ## results-*.txt interleaves mode="opt" records, which carry only the
+        ## training loss, with the mode="eval" ones holding the rmse keys
+        fin = open(f, 'r')
+        evals = [r for r in (json.loads(l) for l in fin)
+                 if r.get('mode') == 'eval' and r.get(key) is not None]
+        fin.close()
+        if not evals:
+            continue
+        files.append(f)
+        values.append(evals[-1][key])
+    if len(files) < nlast:
+        raise RuntimeError(f'only {len(files)} of the seeds produced usable '
+                           f'results, {nlast} needed')
+    values = np.array(values)
+    ## argsort, not argpartition: the latter only places element nlast, so its
+    ## last index is not the worst model
+    order = np.argsort(values)
     if worst:
-        paths = [files[best[i]].split('/')[0] for i in range(nlast-1)]
-        paths.append(files[best[-1]].split('/')[0])
+        best = list(order[:nlast-1]) + [order[-1]]
     else:
-        paths = [files[best[i]].split('/')[0] for i in range(nlast)]
-    return paths, stats
+        best = list(order[:nlast])
+    paths = [files[i].split(os.sep)[0] for i in best]
+    return paths, values
 
 def clean_init(all_path, best_path):
-    for i in glob.glob(all_files):
-        if i in path_best:
+    keep = {os.path.normpath(p) for p in best_path}
+    for i in glob.glob(all_path):
+        if os.path.normpath(i) in keep:
             continue
         else:
-            os.system(f'rm -rf {i}')
+            shutil.rmtree(i, ignore_errors=True)
 
 class mace_process(Process):
-    def __init__(self, ncpu, config, configfile, dft, trainfraction, epochs, dir=None):
+    def __init__(self, ncpu, config, configfile, dft, trainfraction, epochs,
+                 dir=None, seed=None):
         ## init tye process
         super().__init__()
         self.ncpu = ncpu
-        self.seed = np.random.randint(0, 10000)
+        self.seed = seed if seed is not None else random.randrange(2**31-1)
         self.is_extend = False
-        self.config = config
+        ## own copy: the module level dict is shared by every process
+        self.config = dict(config)
         self.configfile = configfile
         self.dftsources = dft
         self.fraction = trainfraction
@@ -103,33 +120,21 @@ class mace_process(Process):
                 print(f'{i}: {self.config[i]}', file=fout)
         fout.close()
 
-    def _write_yaml_ext(self):
-        fout = open(f'{self.path}/{self.configfile}', 'w')
-        for i in self.config:
-            if i == "E0s":
-                print(f'{i}: "{self.config[i].strip()}"', file=fout)
-            else:
-                print(f'{i}: {self.config[i].strip()}', file=fout)
-        fout.close()
-
     def _shuffle(self):
-        os.system(f' rm {self.path}/*xyz 2>/dev/null')
         n = len(self.dftsources)
         ntrain = int(n*self.fraction)
         rs = np.random.RandomState(self.seed)
-        rs.shuffle(self.dftsources)
-        for i in range(ntrain):
-            write(f'tmp-{self.seed}.xyz', self.dftsources[i])
-            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/{self.config['train_file']}')
-        for i in range(ntrain,n):
-            write(f'tmp-{self.seed}.xyz', self.dftsources[i])
-            os.system(f'cat tmp-{self.seed}.xyz >> {self.path}/{self.config['test_file']}')
-        os.remove(f'tmp-{self.seed}.xyz')
+        idx = rs.permutation(n)
+        train_file = self.config['train_file']
+        test_file = self.config['test_file']
+        write(f'{self.path}/{train_file}',
+              [self.dftsources[i] for i in idx[:ntrain]])
+        write(f'{self.path}/{test_file}',
+              [self.dftsources[i] for i in idx[ntrain:]])
 
     def gen_path(self):
         self.path = f'seed_{self.seed}'
-        if os.path.isdir(self.path):
-            os.system(f'rm -f {path}')
+        shutil.rmtree(self.path, ignore_errors=True)
         os.mkdir(self.path)
         self._shuffle()
         self._write_yaml()
@@ -142,9 +147,10 @@ class mace_process(Process):
             key = line.split(':')[0]
             config[key] = line[len(key)+1:]
         fin.close()
+        ## the seed names the checkpoint that restart_latest has to pick up
         self.seed = int(config['seed'])
         self.config['restart_latest'] = True
-        self.config['log_dir'] = self.config['log_dir']+'ext'
+        self.config['log_dir'] = self.config['log_dir']+'-ext'
         self.config['results'] = self.config['results']+'-ext'
         self.configfile = "config-ext.yaml"
         self._write_yaml()
@@ -169,21 +175,27 @@ if __name__ == "__main__":
     # no parallel
     if type(dftsources) == str:
         files = glob.glob(dftsources)
+    else:
+        files = dftsources
     dftsamples = []
     for f in files:
         for s in read(f, ':'):
             dftsamples.append(s)
     ## init
+    nseeds = nmax//ncore_per_task0
+    ## drawn without replacement: a repeated seed means a shared seed_* directory
+    seeds = random.sample(range(2**31-1), nseeds)
     pps = []
-    for i in range(nmax//ncore_per_task0):
+    for i in range(nseeds):
         pps.append(mace_process(ncore_per_task0, config,configfile0,
-                                dftsamples, fraction,max_epochs[0])
+                                dftsamples, fraction,max_epochs[0],
+                                seed=seeds[i])
                    ) 
     for i in pps:
         i.start()
     for i in pps:
         i.join()
-    paths, stats = process_results('seed*/results-res/*txt', nlast, use, True)
+    paths, stats = process_results('seed*/results-res/*txt', nlast, use, worst)
     ## best
     pps = []
     for path in paths:
