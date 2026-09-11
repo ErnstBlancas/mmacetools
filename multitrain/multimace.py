@@ -10,6 +10,8 @@ nmax = 256               ## max number of cores
 ncore_per_task0 = 2     ## to run nmax//ncore_per_task0 initial seeds
 nlast = 8               ## run nmax//nlast best models with more epochs
 max_epochs = [2, 20]   ## max_epochs for the best seeds
+device = ['cpu', 'cpu'] ## device(s) for [stage one, stage two]; give one value
+                        ## to use it for both steps
 use = 'force'           ## best model: force, energy, loss, stress (see metrics)
 worst = True            ## if true train nlast-1 models and the worst performing one
 config = {              ## or read corresponding config.yaml
@@ -32,8 +34,7 @@ config = {              ## or read corresponding config.yaml
           'ema': True,
           'ema_decay': 0.99,
           'default_dtype': 'float64',
-          'device': 'cpu',
-          'r_max': 6.0, 
+          'r_max': 6.0,
           'energy_key': 'energy_dft',
           'forces_key': 'forces_dft',
           'E0s': "{8:-0.204170677752367E+04, 13:-0.661017373326158E+04}",
@@ -260,18 +261,22 @@ if __name__ == "__main__":
             dftsamples.append(s)
     log(f'read {len(dftsamples)} samples from {len(files)} file(s): '
         + ', '.join(str(f) for f in files))
+    ## device(s): one value covers both steps, two values assign one per step
+    device1 = device[0]
+    device2 = device[0] if len(device) == 1 else device[1]
     ## init
     nseeds = nmax//ncore_per_task0
     ## drawn without replacement: a repeated seed means a shared seed_* directory
     seeds = random.sample(range(2**31-1), nseeds)
+    config['device'] = device1
     pps = []
     for i in range(nseeds):
         pps.append(mace_process(ncore_per_task0, config,configfile0,
                                 dftsamples, fraction,max_epochs[0],
                                 seed=seeds[i])
-                   ) 
+                   )
     log(f'stage one: {nseeds} seeds, {ncore_per_task0} threads each, '
-        f'{max_epochs[0]} epochs')
+        f'{max_epochs[0]} epochs, device {device1}')
     for i in pps:
         i.start()
     ok, bad = wait(pps, 'stage one')
@@ -283,13 +288,14 @@ if __name__ == "__main__":
         log('warning: picked for stage two although stage one did not finish: '
             + ', '.join(crashed))
     ## best
+    config['device'] = device2
     pps = []
     for path in paths:
         pps.append(mace_process(nmax//nlast, config, configfile0,
                                 dftsamples, fraction,max_epochs[1], path)
                    )
     log(f'stage two: extending {len(paths)} model(s) to {max_epochs[1]} epochs '
-        f'with {nmax//nlast} threads each: ' + ', '.join(paths))
+        f'with {nmax//nlast} threads each, device {device2}: ' + ', '.join(paths))
     for i in pps:
         i.start()
     wait(pps, 'stage two')
