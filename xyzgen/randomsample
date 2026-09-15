@@ -249,6 +249,7 @@ def main():
 
     samples = []
     for f in args.path:
+        print('Reading: ', f)
         for s in read(f, ":"):
             samples.append(s)
     addrand = args.amplitude is not None

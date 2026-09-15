@@ -14,7 +14,23 @@ def warn(msg):
     print(f"WARNING: {msg}", file=sys.stderr)
 
 
+def check_finished(name):
+    """Raise AimsParseError unless FHI-AIMS reports it finished successfully.
+
+    FHI-AIMS prints 'Have a nice day.' as the last line of a run that
+    completed normally; anything else (crash, walltime kill, still running)
+    means the forces/energies in the file cannot be trusted.
+    """
+    with open(name, 'r') as fin:
+        for line in fin:
+            if 'Have a nice day.' in line:
+                return
+    raise AimsParseError("calculation did not finish successfully "
+                          "('Have a nice day.' not found)")
+
+
 def read_aimsout(name):
+    check_finished(name)
     fin = open(name, 'r')
     cell, pos, forces, atoms, energies = [], [], [], [], []
     stress = []
@@ -109,6 +125,7 @@ def reconcile(name, cell, forces, energies):
 
 
 def read_aimsout_isolated(name):
+    check_finished(name)
     fin = open(name, 'r')
     atom, energy = None, None
     for line in fin:
