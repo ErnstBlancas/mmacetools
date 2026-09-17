@@ -1,3 +1,18 @@
+# Model was trained/saved on a GPU: e3nn's TorchScript submodules ignore
+# map_location, so force torch.jit.load onto the CPU before importing MACE.
+import functools
+import torch
+
+
+## only for gpu to cpu 
+#_orig_jit_load = torch.jit.load
+#@functools.wraps(_orig_jit_load)
+#def _jit_load_cpu(f, map_location=None, *args, **kwargs):
+#    return _orig_jit_load(f, map_location="cpu", *args, **kwargs)
+#
+
+# torch.jit.load = _jit_load_cpu
+
 from mace.calculators import MACECalculator
 from subprocess import check_output
 from ase.io import read, write
@@ -10,33 +25,29 @@ import time
 
 
 #################### Input #################### 
-#mace_model = 'models/mace-omat-0-small.model'
-#targets = 'al*/0-relax/*.out'
-#device = 'cpu'
-#fname = 'iter0.out'
-#
-mace_model = 'iter0/models/finetune.model.model'
-targets = '*/fps*/*.out'
-device = 'cpu'
-fname = 'iter0.out'
+mace_models = ['cell_01-iter0.model']
+
+targets = '*/*.in'
+device = 'cuda'
 ###############################################
 
-macepot = MACECalculator(model_paths=[mace_model], device=device)
-fout = 'iter0.out'
-fout = open(fout, 'w')
-for f in glob.glob(targets):
-    ffull = "/".join(f.split('/')[0:2])+'/'+ fname
-    line = f"grep -ri 'Unit cell volume' {f} " + "| tail -1  | awk '{printf \"%.10f\", $6}'"
-    v = np.float64(check_output(line, shell=True).decode('utf8'))
-    cell = read(f)
-    true_dft = cell.get_potential_energy()
-    e_unrel = cell.get_potential_energy()
-    cell.calc = macepot
-    dyn = BFGS(cell)
-    a = time.time()
-    dyn.run(fmax=0.001)
-    b = time.time()
-    e_rel = cell.get_potential_energy()
-    fout.write(f"{v:16.12f} {true_dft:16.12f} {cell.get_volume():16.12f} {e_unrel:16.12f} {e_rel:16.12f} {b-a:8.4f} # {ffull}")
-    print(f"{v:16.12f} {true_dft:16.12f} {cell.get_volume():16.12f} {e_unrel:16.12f} {e_rel:16.12f} {b-a:8.4f}# {ffull}")
-fout.close()
+phases = ['formI', 'formII', 'formIII', 'formIII-o', 'formVI', 'formVII', ]
+for mace_model in mace_models:
+    label = mace_model[:-6]+'.dat'
+    macepot = MACECalculator(model_paths=[mace_model], device=device)
+    print(mace_model)
+    for phase in phases:
+        print(phase)
+        fout = open(phase+'/'+label, 'w')
+        for f in sorted(glob.glob(phase+ '/' + targets)):
+            print(f)
+            cell = read(f)
+            cell.calc = macepot
+            dyn = BFGS(cell, logfile=None, maxstep=250)
+            dyn.run(fmax=0.05, steps=500)
+            flag = '# conv' if dyn.converged() else '# not conv'
+            e_rel = cell.get_potential_energy()
+            v = cell.get_volume()
+            fout.write(f"{v:16.12f}  {e_rel:16.12f}  {flag}\n")
+            print(f"{v:16.12f}  {e_rel:16.12f}  {flag}\n ")
+        fout.close()
