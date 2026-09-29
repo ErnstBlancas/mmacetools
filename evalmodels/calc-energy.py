@@ -5,13 +5,12 @@ import torch
 
 
 ## only for gpu to cpu 
-#_orig_jit_load = torch.jit.load
-#@functools.wraps(_orig_jit_load)
-#def _jit_load_cpu(f, map_location=None, *args, **kwargs):
-#    return _orig_jit_load(f, map_location="cpu", *args, **kwargs)
-#
+_orig_jit_load = torch.jit.load
+@functools.wraps(_orig_jit_load)
+def _jit_load_cpu(f, map_location=None, *args, **kwargs):
+    return _orig_jit_load(f, map_location="cpu", *args, **kwargs)
 
-# torch.jit.load = _jit_load_cpu
+torch.jit.load = _jit_load_cpu
 
 from mace.calculators import MACECalculator
 from subprocess import check_output
@@ -43,11 +42,13 @@ for mace_model in mace_models:
             print(f)
             cell = read(f)
             cell.calc = macepot
+            a = time.time()
             dyn = BFGS(cell, logfile=None, maxstep=250)
-            dyn.run(fmax=0.05, steps=500)
+            dyn.run(fmax=0.05, steps=250)
             flag = '# conv' if dyn.converged() else '# not conv'
             e_rel = cell.get_potential_energy()
             v = cell.get_volume()
-            fout.write(f"{v:16.12f}  {e_rel:16.12f}  {flag}\n")
+            b = time.time()
+            fout.write(f"{v:16.12f}  {e_rel:16.12f} {b-a:10.4f}  {flag}\n")
             print(f"{v:16.12f}  {e_rel:16.12f}  {flag}\n ")
         fout.close()

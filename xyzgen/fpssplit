@@ -1,0 +1,280 @@
+#!/home/ernesto/install/ase/bin/python3.14
+"""Split an extxyz dataset into train/valid/test using farthest point sampling.
+
+FPS over per-frame SOAP descriptors (same machinery as `randomsample
+--method fps`) orders the frames from most to least distinctive. Two ways
+of turning that order into a split:
+
+  spread (default)  the first --anchor picks (the extremes of descriptor
+                    space) always go to train, so the model never has to
+                    extrapolate to them. The rest of the FPS order is cut
+                    into short consecutive blocks, and each block is split
+                    at random in the train:valid:test proportion. Every
+                    region of descriptor space is then represented in all
+                    three sets, and valid/test measure interpolation error
+                    on data distributed like the training set.
+
+  holdout           the n_test + n_valid most mutually distant frames go
+                    to test and valid, everything else to train. This is
+                    an extrapolation test: the held-out frames are exactly
+                    the ones the training set covers worst (e.g. the most
+                    expanded or most compressed cells), so their errors are
+                    pessimistic and the training set is narrower than the
+                    data. The picks are interleaved between test and valid
+                    along the FPS order; --assign sequential gives test the
+                    first (most extreme) picks instead.
+
+With --stratify, FPS is run separately inside each stratum (the first
+component of the name= path, e.g. formI), so every polymorph gets its own
+share of test/valid frames.
+
+Single-atom frames (isolated-atom references for the E0s) always go to
+train and take no part in FPS.
+
+Frames are copied verbatim (raw text blocks), so every key and value in
+the comment line is preserved exactly.
+"""
+import argparse, os, re, sys
+from collections import Counter, defaultdict
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import numpy as np
+
+def _load_randomsample():
+    """Import the extensionless `randomsample` script sitting next to this one."""
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "randomsample")
+    loader = SourceFileLoader("randomsample", path)
+    mod = module_from_spec(spec_from_loader("randomsample", loader))
+    loader.exec_module(mod)
+    return mod
+
+NAME_RE = re.compile(r'name="([^"]+)"')
+
+def read_raw_frames(path):
+    """Raw text block of every frame, in file order (same order as ase.io.read)."""
+    with open(path) as f:
+        lines = f.readlines()
+    frames, i = [], 0
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        nat = int(lines[i].split()[0])
+        block = lines[i:i + nat + 2]
+        if len(block) != nat + 2:
+            sys.exit(f"truncated frame at line {i + 1} of {path}")
+        frames.append("".join(block))
+        i += nat + 2
+    return frames
+
+def frame_name(block):
+    m = NAME_RE.search(block.split("\n", 2)[1])
+    return m.group(1) if m else ""
+
+def count(x, n):
+    """Fraction (<1) or absolute number (>=1) of n frames."""
+    return int(round(x * n)) if x < 1 else int(x)
+
+def split_picks(order, n_test, n_valid, mode):
+    """Distribute an FPS-ordered list of picks between test and valid."""
+    if mode == "sequential":
+        return list(order[:n_test]), list(order[n_test:n_test + n_valid])
+    tot = n_test + n_valid
+    test, valid = [], []
+    for i, idx in enumerate(order[:tot]):
+        # give pick i to test whenever that keeps test on its target share
+        if (i + 1) * n_test // tot > i * n_test // tot:
+            test.append(idx)
+        else:
+            valid.append(idx)
+    return test, valid
+
+def spread_picks(order, n_test, n_valid, rs):
+    """Stratified random split along an FPS order.
+
+    The order is cut into consecutive blocks sized so that each block holds
+    about one frame of the smaller held-out set; within a block, which
+    frames go to test/valid is random. The per-block counts come from
+    rounding the cumulative targets, so the totals are exactly n_test and
+    n_valid and the held-out frames are spread evenly along the FPS order
+    (i.e. over all regions of descriptor space, not only the extremes).
+    """
+    n = len(order)
+    held = [k for k in (n_test, n_valid) if k > 0]
+    block = int(np.ceil(n / min(held))) if held else n
+    test, valid = [], []
+    for start in range(0, n, block):
+        end = min(start + block, n)
+        nt = round(n_test * end / n) - round(n_test * start / n)
+        nv = round(n_valid * end / n) - round(n_valid * start / n)
+        pos = order[start + rs.permutation(end - start)]
+        test += list(pos[:nt])
+        valid += list(pos[nt:nt + nv])
+    return test, valid
+
+def main():
+    p = argparse.ArgumentParser(prog="fpssplit", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("xyz", help="input extxyz file")
+    p.add_argument("-o", "--outdir", default="split", help="output directory (default: split)")
+    p.add_argument("--test", type=float, default=0.15,
+                   help="test frames: fraction if <1, number if >=1 (default 0.15)")
+    p.add_argument("--valid", type=float, default=0.15,
+                   help="valid frames: fraction if <1, number if >=1 (default 0.15)")
+    p.add_argument("--mode", choices=["spread", "holdout"], default="spread",
+                   help="spread: FPS extremes to train, held-out sets drawn evenly along "
+                        "the FPS order (default); holdout: the most distant frames "
+                        "become valid/test (extrapolation test)")
+    p.add_argument("--anchor", type=float, default=0.05,
+                   help="spread only: first FPS picks always put in train, fraction "
+                        "if <1, number if >=1 (default 0.05)")
+    p.add_argument("--assign", choices=["interleave", "sequential"], default="interleave",
+                   help="holdout only: interleave alternates FPS picks between test and "
+                        "valid (default); sequential gives the first picks to test")
+    p.add_argument("--stratify", action="store_true",
+                   help="run FPS separately per stratum (first name= path component)")
+    p.add_argument("--seed", type=int, default=None,
+                   help="seed for the FPS starting frame and the spread draws "
+                        "(time-based if unset)")
+    p.add_argument("--energy-key", default="energy_dft",
+                   help="info key used for the E/atom summary (default energy_dft)")
+    p.add_argument("--no-normalize", dest="normalize", action="store_false",
+                   help="do not L2-normalize the frame descriptors")
+    p.add_argument("--soap-rcut", type=float, nargs="+", default=[5.0], metavar="R")
+    p.add_argument("--soap-nmax", type=int, nargs="+", default=[8], metavar="N")
+    p.add_argument("--soap-lmax", type=int, nargs="+", default=[6], metavar="L")
+    p.add_argument("--soap-sigma", type=float, nargs="+", default=[0.5], metavar="S")
+    p.add_argument("--soap-weight", type=float, default=0.5, metavar="W")
+    p.add_argument("--force", action="store_true", help="overwrite existing output files")
+    args = p.parse_args()
+
+    rsmod = _load_randomsample()
+    from ase.io import read
+
+    raw = read_raw_frames(args.xyz)
+    atoms = read(args.xyz, ":")
+    if len(raw) != len(atoms):
+        sys.exit(f"frame count mismatch: {len(raw)} raw blocks vs {len(atoms)} read by ASE")
+    names = [frame_name(b) for b in raw]
+    strata = [n.split("/")[0] if n else "?" for n in names]
+    isolated = np.array([len(a) == 1 for a in atoms])
+    mol = np.where(~isolated)[0]
+
+    paths = {k: os.path.join(args.outdir, f"{k}.xyz") for k in ("train", "valid", "test")}
+    clash = [q for q in paths.values() if os.path.exists(q)]
+    if clash and not args.force:
+        sys.exit(f"refusing to overwrite {', '.join(clash)} (use --force)")
+
+    if args.seed is None:
+        from time import time
+        args.seed = int(time())
+    rs = np.random.RandomState(args.seed)
+
+    print(f"{len(raw)} frames ({isolated.sum()} isolated atoms, kept in train); "
+          f"computing SOAP descriptors (rcut={args.soap_rcut} nmax={args.soap_nmax} "
+          f"lmax={args.soap_lmax} sigma={args.soap_sigma})")
+    d = rsmod.soap_descriptors([atoms[i] for i in mol], rcut=args.soap_rcut,
+                               nmax=args.soap_nmax, lmax=args.soap_lmax,
+                               sigma=args.soap_sigma, normalize=args.normalize,
+                               weight=args.soap_weight)
+    desc = np.zeros((len(raw), d.shape[1]))
+    desc[mol] = d
+
+    if args.stratify:
+        pools = defaultdict(list)
+        for i in mol:
+            pools[strata[i]].append(i)
+    else:
+        pools = {"all": list(mol)}
+
+    test, valid, rank = [], [], {}
+    for key in sorted(pools):
+        idx = np.array(pools[key])
+        nt, nv = count(args.test, len(idx)), count(args.valid, len(idx))
+        if args.mode == "holdout":
+            if nt + nv >= len(idx):
+                sys.exit(f"{key}: {nt} test + {nv} valid leaves no training frames "
+                         f"out of {len(idx)}")
+            order = idx[rsmod._greedy_fps(desc[idx], nt + nv, rs)]
+            t, v = split_picks(order, nt, nv, args.assign)
+        else:
+            na = count(args.anchor, len(idx))
+            if na + nt + nv >= len(idx):
+                sys.exit(f"{key}: {na} anchors + {nt} test + {nv} valid leaves no other "
+                         f"training frames out of {len(idx)}")
+            order = idx[rsmod._greedy_fps(desc[idx], len(idx), rs)]
+            t, v = spread_picks(order[na:], nt, nv, rs)
+        rank.update({int(j): r for r, j in enumerate(order)})
+        test += t
+        valid += v
+
+    label = np.full(len(raw), "train", dtype=object)
+    label[test] = "test"
+    label[valid] = "valid"
+
+    # per-stratum table
+    tab = Counter(zip(strata, label))
+    extra = f"anchor={args.anchor}" if args.mode == "spread" else f"assign={args.assign}"
+    print(f"\nseed {args.seed}, mode={args.mode}, {extra}, stratify={args.stratify}\n")
+    print(f"{'stratum':<12}{'frames':>7}{'train':>7}{'valid':>7}{'test':>7}")
+    for s in sorted(set(strata)):
+        n = sum(tab[(s, k)] for k in ("train", "valid", "test"))
+        print(f"{s:<12}{n:>7}{tab[(s, 'train')]:>7}{tab[(s, 'valid')]:>7}{tab[(s, 'test')]:>7}")
+
+    # how far each held-out set sits from the training set in descriptor space
+    tr = desc[(label == "train") & ~isolated]
+    def nn_dist(x):
+        return np.array([np.linalg.norm(tr - r, axis=1).min() for r in x])
+    d_tr = np.array([np.sort(np.linalg.norm(tr - r, axis=1))[1] for r in tr])
+    print(f"\nnearest-train SOAP distance   median      max")
+    print(f"{'train (loo)':<28}{np.median(d_tr):>8.4f}{d_tr.max():>9.4f}")
+    for k in ("valid", "test"):
+        d = nn_dist(desc[(label == k) & ~isolated])
+        if len(d):
+            print(f"{k:<28}{np.median(d):>8.4f}{d.max():>9.4f}")
+
+    # physical coverage: a held-out set shifted in volume or energy relative
+    # to train means the split is testing extrapolation, not interpolation
+    def per_atom(i):
+        a = atoms[i]
+        v = a.get_volume() / len(a) if a.pbc.all() else np.nan
+        e = a.info.get(args.energy_key, np.nan) / len(a)
+        return v, e
+    ve = np.full((len(raw), 2), np.nan)
+    ve[mol] = [per_atom(i) for i in mol]
+    ve[:, 1] = (ve[:, 1] - np.nanmin(ve[:, 1])) * 1000.0   # meV/atom above lowest
+    trm = (label == "train") & ~isolated
+    for c, (what, unit) in enumerate([("V/atom", "A^3"), ("E/atom - Emin", "meV")]):
+        if np.isnan(ve[trm, c]).all():
+            continue
+        lo, hi = np.nanmin(ve[trm, c]), np.nanmax(ve[trm, c])
+        print(f"\n{what + ' (' + unit + ')':<22}{'mean':>8}{'std':>8}{'min':>8}"
+              f"{'max':>8}{'outside train':>15}")
+        for k in ("train", "valid", "test"):
+            x = ve[(label == k) & ~isolated, c]
+            x = x[~np.isnan(x)]
+            if not len(x):
+                continue
+            out = "" if k == "train" else f"{int(((x < lo) | (x > hi)).sum()):>15}"
+            print(f"{k:<22}{x.mean():>8.2f}{x.std():>8.2f}{x.min():>8.2f}{x.max():>8.2f}{out}")
+
+    os.makedirs(args.outdir, exist_ok=True)
+    print()
+    for k in ("train", "valid", "test"):
+        with open(paths[k], "w") as f:
+            f.writelines(b for b, l in zip(raw, label) if l == k)
+        print(f"{paths[k]:<28}{int((label == k).sum()):>5} frames")
+
+    with open(os.path.join(args.outdir, "fpssplit.txt"), "w") as f:
+        f.write(f"# {args.xyz} seed={args.seed} test={args.test} valid={args.valid} "
+                f"mode={args.mode} anchor={args.anchor} assign={args.assign} "
+                f"stratify={args.stratify} rcut={args.soap_rcut} "
+                f"nmax={args.soap_nmax} lmax={args.soap_lmax} sigma={args.soap_sigma} "
+                f"weight={args.soap_weight} normalize={args.normalize}\n")
+        f.write("# frame  set    fps_rank  name\n")
+        for i, (l, n) in enumerate(zip(label, names)):
+            r = rank.get(i, "")
+            f.write(f"{i:>7}  {l:<6}{r!s:>9}  {n}\n")
+
+if __name__ == "__main__":
+    main()
