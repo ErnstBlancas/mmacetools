@@ -75,6 +75,48 @@ def count(x, n):
     """Fraction (<1) or absolute number (>=1) of n frames."""
     return int(round(x * n)) if x < 1 else int(x)
 
+def progress(label, done, total):
+    """One-line counter on stderr, updated about 100 times per loop."""
+    if done % max(1, total // 100) and done != total:
+        return
+    sys.stderr.write(f"\r{label}: {done}/{total} ({100 * done // total}%)")
+    if done == total:
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+SOAP_CHUNK = 100
+
+def show_soap_progress(rsmod):
+    """Make randomsample build SOAP in chunks, with a progress counter.
+
+    Each chunk gets the first frame prepended (and its row dropped), because
+    _soap_block takes the species list and pbc from its first frame; this
+    keeps every chunk identical to a single call over all frames.
+    """
+    soap_block = rsmod._soap_block
+    def chunked(samples, **block):
+        parts = []
+        for start in range(0, len(samples), SOAP_CHUNK):
+            chunk = samples[start:start + SOAP_CHUNK]
+            parts.append(soap_block([samples[0]] + chunk, **block)[1:])
+            progress("SOAP", start + len(chunk), len(samples))
+        return np.vstack(parts)
+    rsmod._soap_block = chunked
+
+def greedy_fps(desc, n, rs, label):
+    """randomsample._greedy_fps with a progress counter (same picks for the same rs)."""
+    first = rs.randint(len(desc))
+    sels = [first]
+    min_dist = np.linalg.norm(desc - desc[first], axis=1)
+    min_dist[first] = -1
+    for i in range(1, n):
+        nxt = int(np.argmax(min_dist))
+        sels.append(nxt)
+        min_dist = np.minimum(min_dist, np.linalg.norm(desc - desc[nxt], axis=1))
+        min_dist[nxt] = -1
+        progress(label, i + 1, n)
+    return np.array(sels)
+
 def split_picks(order, n_test, n_valid, mode):
     """Distribute an FPS-ordered list of picks between test and valid."""
     if mode == "sequential":
@@ -149,6 +191,7 @@ def main():
     args = p.parse_args()
 
     rsmod = _load_randomsample()
+    show_soap_progress(rsmod)
     from ase.io import read
 
     raw = read_raw_frames(args.xyz)
@@ -195,14 +238,14 @@ def main():
             if nt + nv >= len(idx):
                 sys.exit(f"{key}: {nt} test + {nv} valid leaves no training frames "
                          f"out of {len(idx)}")
-            order = idx[rsmod._greedy_fps(desc[idx], nt + nv, rs)]
+            order = idx[greedy_fps(desc[idx], nt + nv, rs, f"FPS {key}")]
             t, v = split_picks(order, nt, nv, args.assign)
         else:
             na = count(args.anchor, len(idx))
             if na + nt + nv >= len(idx):
                 sys.exit(f"{key}: {na} anchors + {nt} test + {nv} valid leaves no other "
                          f"training frames out of {len(idx)}")
-            order = idx[rsmod._greedy_fps(desc[idx], len(idx), rs)]
+            order = idx[greedy_fps(desc[idx], len(idx), rs, f"FPS {key}")]
             t, v = spread_picks(order[na:], nt, nv, rs)
         rank.update({int(j): r for r, j in enumerate(order)})
         test += t
@@ -223,13 +266,21 @@ def main():
 
     # how far each held-out set sits from the training set in descriptor space
     tr = desc[(label == "train") & ~isolated]
-    def nn_dist(x):
-        return np.array([np.linalg.norm(tr - r, axis=1).min() for r in x])
-    d_tr = np.array([np.sort(np.linalg.norm(tr - r, axis=1))[1] for r in tr])
+    def nn_dist(x, name):
+        d = []
+        for i, r in enumerate(x):
+            d.append(np.linalg.norm(tr - r, axis=1).min())
+            progress(f"nearest-train {name}", i + 1, len(x))
+        return np.array(d)
+    d_tr = []
+    for i, r in enumerate(tr):
+        d_tr.append(np.sort(np.linalg.norm(tr - r, axis=1))[1])
+        progress("nearest-train train", i + 1, len(tr))
+    d_tr = np.array(d_tr)
     print(f"\nnearest-train SOAP distance   median      max")
     print(f"{'train (loo)':<28}{np.median(d_tr):>8.4f}{d_tr.max():>9.4f}")
     for k in ("valid", "test"):
-        d = nn_dist(desc[(label == k) & ~isolated])
+        d = nn_dist(desc[(label == k) & ~isolated], k)
         if len(d):
             print(f"{k:<28}{np.median(d):>8.4f}{d.max():>9.4f}")
 
