@@ -25,7 +25,10 @@ of turning that order into a split:
                     first (most extreme) picks instead.
 
 With --target, the training set is limited to that many frames and the
-rest are left out (labelled "unused" in fpssplit.txt). FPS then only
+rest are left out (labelled "unused" in fpssplit.txt). --test/--valid
+fractions then refer to the frames used (train + valid + test), so the
+split keeps the requested proportions; absolute numbers are kept as they
+are. FPS then only
 picks target + n_test + n_valid frames: in spread mode the split above is
 applied to that subset; in holdout mode train gets the FPS picks that
 follow the held-out ones.
@@ -240,13 +243,22 @@ def main():
     else:
         pools = {"all": list(mol)}
 
+    if args.target is not None and sum(x for x in (args.test, args.valid) if x < 1) >= 1:
+        sys.exit("--test and --valid fractions add up to 1 or more, no room for --target")
+
     test, valid, rank = [], [], {}
     for key in sorted(pools):
         idx = np.array(pools[key])
-        nt, nv = count(args.test, len(idx)), count(args.valid, len(idx))
         n = len(idx)   # frames to use
-        if args.target is not None:
+        if args.target is None:
+            nt, nv = count(args.test, n), count(args.valid, n)
+        else:
+            # test/valid fractions refer to the frames used, so that
+            # train:valid:test keeps the requested proportions
             ntr = count(args.target, len(idx))
+            fixed = ntr + sum(int(x) for x in (args.test, args.valid) if x >= 1)
+            n_used = fixed / (1 - sum(x for x in (args.test, args.valid) if x < 1))
+            nt, nv = count(args.test, n_used), count(args.valid, n_used)
             if ntr + nt + nv > len(idx):
                 sys.exit(f"{key}: {ntr} train + {nt} test + {nv} valid is more than "
                          f"the {len(idx)} frames available")
