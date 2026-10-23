@@ -24,9 +24,16 @@ of turning that order into a split:
                     along the FPS order; --assign sequential gives test the
                     first (most extreme) picks instead.
 
+With --target, the training set is limited to that many frames and the
+rest are left out (labelled "unused" in fpssplit.txt). FPS then only
+picks target + n_test + n_valid frames: in spread mode the split above is
+applied to that subset; in holdout mode train gets the FPS picks that
+follow the held-out ones.
+
 With --stratify, FPS is run separately inside each stratum (the first
 component of the name= path, e.g. formI), so every polymorph gets its own
-share of test/valid frames.
+share of test/valid frames. Absolute --test/--valid/--target numbers are
+then per stratum.
 
 Single-atom frames (isolated-atom references for the E0s) always go to
 train and take no part in FPS.
@@ -163,6 +170,9 @@ def main():
                    help="test frames: fraction if <1, number if >=1 (default 0.15)")
     p.add_argument("--valid", type=float, default=0.15,
                    help="valid frames: fraction if <1, number if >=1 (default 0.15)")
+    p.add_argument("--target", type=float, default=None,
+                   help="train frames: fraction if <1, number if >=1; the remaining "
+                        "frames are not used (default: all frames not in valid/test)")
     p.add_argument("--mode", choices=["spread", "holdout"], default="spread",
                    help="spread: FPS extremes to train, held-out sets drawn evenly along "
                         "the FPS order (default); holdout: the most distant frames "
@@ -234,35 +244,49 @@ def main():
     for key in sorted(pools):
         idx = np.array(pools[key])
         nt, nv = count(args.test, len(idx)), count(args.valid, len(idx))
+        n = len(idx)   # frames to use
+        if args.target is not None:
+            ntr = count(args.target, len(idx))
+            if ntr + nt + nv > len(idx):
+                sys.exit(f"{key}: {ntr} train + {nt} test + {nv} valid is more than "
+                         f"the {len(idx)} frames available")
+            n = ntr + nt + nv
         if args.mode == "holdout":
-            if nt + nv >= len(idx):
+            if nt + nv >= n:
                 sys.exit(f"{key}: {nt} test + {nv} valid leaves no training frames "
-                         f"out of {len(idx)}")
-            order = idx[greedy_fps(desc[idx], nt + nv, rs, f"FPS {key}")]
+                         f"out of {n}")
+            npick = n if args.target is not None else nt + nv
+            order = idx[greedy_fps(desc[idx], npick, rs, f"FPS {key}")]
             t, v = split_picks(order, nt, nv, args.assign)
         else:
             na = count(args.anchor, len(idx))
-            if na + nt + nv >= len(idx):
+            if na + nt + nv >= n:
                 sys.exit(f"{key}: {na} anchors + {nt} test + {nv} valid leaves no other "
-                         f"training frames out of {len(idx)}")
-            order = idx[greedy_fps(desc[idx], len(idx), rs, f"FPS {key}")]
+                         f"training frames out of {n}")
+            order = idx[greedy_fps(desc[idx], n, rs, f"FPS {key}")]
             t, v = spread_picks(order[na:], nt, nv, rs)
         rank.update({int(j): r for r, j in enumerate(order)})
         test += t
         valid += v
 
     label = np.full(len(raw), "train", dtype=object)
+    if args.target is not None:
+        # with --target only the FPS-picked frames are used
+        label[mol] = "unused"
+        label[list(rank)] = "train"
     label[test] = "test"
     label[valid] = "valid"
 
     # per-stratum table
     tab = Counter(zip(strata, label))
+    sets = ("train", "valid", "test") + (("unused",) if args.target is not None else ())
     extra = f"anchor={args.anchor}" if args.mode == "spread" else f"assign={args.assign}"
-    print(f"\nseed {args.seed}, mode={args.mode}, {extra}, stratify={args.stratify}\n")
-    print(f"{'stratum':<12}{'frames':>7}{'train':>7}{'valid':>7}{'test':>7}")
+    print(f"\nseed {args.seed}, mode={args.mode}, {extra}, target={args.target}, "
+          f"stratify={args.stratify}\n")
+    print(f"{'stratum':<12}{'frames':>7}" + "".join(f"{k:>7}" for k in sets))
     for s in sorted(set(strata)):
-        n = sum(tab[(s, k)] for k in ("train", "valid", "test"))
-        print(f"{s:<12}{n:>7}{tab[(s, 'train')]:>7}{tab[(s, 'valid')]:>7}{tab[(s, 'test')]:>7}")
+        n = sum(tab[(s, k)] for k in sets)
+        print(f"{s:<12}{n:>7}" + "".join(f"{tab[(s, k)]:>7}" for k in sets))
 
     # how far each held-out set sits from the training set in descriptor space
     tr = desc[(label == "train") & ~isolated]
@@ -318,7 +342,8 @@ def main():
 
     with open(os.path.join(args.outdir, "fpssplit.txt"), "w") as f:
         f.write(f"# {args.xyz} seed={args.seed} test={args.test} valid={args.valid} "
-                f"mode={args.mode} anchor={args.anchor} assign={args.assign} "
+                f"target={args.target} mode={args.mode} anchor={args.anchor} "
+                f"assign={args.assign} "
                 f"stratify={args.stratify} rcut={args.soap_rcut} "
                 f"nmax={args.soap_nmax} lmax={args.soap_lmax} sigma={args.soap_sigma} "
                 f"weight={args.soap_weight} normalize={args.normalize}\n")
