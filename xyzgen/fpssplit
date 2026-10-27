@@ -24,6 +24,11 @@ of turning that order into a split:
                     along the FPS order; --assign sequential gives test the
                     first (most extreme) picks instead.
 
+  random            plain random split, no FPS and no SOAP descriptors:
+                    frames are shuffled and the first n_test go to test,
+                    the next n_valid to valid and the rest to train. Useful
+                    as a baseline to compare the FPS splits against.
+
 With --target, the training set is limited to that many frames and the
 rest are left out (labelled "unused" in fpssplit.txt). --test/--valid
 fractions then refer to the frames used (train + valid + test), so the
@@ -176,10 +181,11 @@ def main():
     p.add_argument("--target", type=float, default=None,
                    help="train frames: fraction if <1, number if >=1; the remaining "
                         "frames are not used (default: all frames not in valid/test)")
-    p.add_argument("--mode", choices=["spread", "holdout"], default="spread",
+    p.add_argument("--mode", choices=["spread", "holdout", "random"], default="spread",
                    help="spread: FPS extremes to train, held-out sets drawn evenly along "
                         "the FPS order (default); holdout: the most distant frames "
-                        "become valid/test (extrapolation test)")
+                        "become valid/test (extrapolation test); random: plain random "
+                        "split, no FPS")
     p.add_argument("--anchor", type=float, default=0.05,
                    help="spread only: first FPS picks always put in train, fraction "
                         "if <1, number if >=1 (default 0.05)")
@@ -189,7 +195,7 @@ def main():
     p.add_argument("--stratify", action="store_true",
                    help="run FPS separately per stratum (first name= path component)")
     p.add_argument("--seed", type=int, default=None,
-                   help="seed for the FPS starting frame and the spread draws "
+                   help="seed for the FPS starting frame and the spread/random draws "
                         "(time-based if unset)")
     p.add_argument("--energy-key", default="energy_dft",
                    help="info key used for the E/atom summary (default energy_dft)")
@@ -226,15 +232,16 @@ def main():
         args.seed = int(time())
     rs = np.random.RandomState(args.seed)
 
-    print(f"{len(raw)} frames ({isolated.sum()} isolated atoms, kept in train); "
-          f"computing SOAP descriptors (rcut={args.soap_rcut} nmax={args.soap_nmax} "
-          f"lmax={args.soap_lmax} sigma={args.soap_sigma})")
-    d = rsmod.soap_descriptors([atoms[i] for i in mol], rcut=args.soap_rcut,
-                               nmax=args.soap_nmax, lmax=args.soap_lmax,
-                               sigma=args.soap_sigma, normalize=args.normalize,
-                               weight=args.soap_weight)
-    desc = np.zeros((len(raw), d.shape[1]))
-    desc[mol] = d
+    print(f"{len(raw)} frames ({isolated.sum()} isolated atoms, kept in train)")
+    if args.mode != "random":
+        print(f"computing SOAP descriptors (rcut={args.soap_rcut} nmax={args.soap_nmax} "
+              f"lmax={args.soap_lmax} sigma={args.soap_sigma})")
+        d = rsmod.soap_descriptors([atoms[i] for i in mol], rcut=args.soap_rcut,
+                                   nmax=args.soap_nmax, lmax=args.soap_lmax,
+                                   sigma=args.soap_sigma, normalize=args.normalize,
+                                   weight=args.soap_weight)
+        desc = np.zeros((len(raw), d.shape[1]))
+        desc[mol] = d
 
     if args.stratify:
         pools = defaultdict(list)
@@ -270,6 +277,12 @@ def main():
             npick = n if args.target is not None else nt + nv
             order = idx[greedy_fps(desc[idx], npick, rs, f"FPS {key}")]
             t, v = split_picks(order, nt, nv, args.assign)
+        elif args.mode == "random":
+            if nt + nv >= n:
+                sys.exit(f"{key}: {nt} test + {nv} valid leaves no training frames "
+                         f"out of {n}")
+            order = idx[rs.permutation(len(idx))[:n]]
+            t, v = list(order[:nt]), list(order[nt:nt + nv])
         else:
             na = count(args.anchor, len(idx))
             if na + nt + nv >= n:
@@ -292,33 +305,35 @@ def main():
     # per-stratum table
     tab = Counter(zip(strata, label))
     sets = ("train", "valid", "test") + (("unused",) if args.target is not None else ())
-    extra = f"anchor={args.anchor}" if args.mode == "spread" else f"assign={args.assign}"
-    print(f"\nseed {args.seed}, mode={args.mode}, {extra}, target={args.target}, "
+    extra = {"spread": f", anchor={args.anchor}", "holdout": f", assign={args.assign}",
+             "random": ""}[args.mode]
+    print(f"\nseed {args.seed}, mode={args.mode}{extra}, target={args.target}, "
           f"stratify={args.stratify}\n")
     print(f"{'stratum':<12}{'frames':>7}" + "".join(f"{k:>7}" for k in sets))
     for s in sorted(set(strata)):
         n = sum(tab[(s, k)] for k in sets)
         print(f"{s:<12}{n:>7}" + "".join(f"{tab[(s, k)]:>7}" for k in sets))
 
-    # how far each held-out set sits from the training set in descriptor space
-    tr = desc[(label == "train") & ~isolated]
-    def nn_dist(x, name):
-        d = []
-        for i, r in enumerate(x):
-            d.append(np.linalg.norm(tr - r, axis=1).min())
-            progress(f"nearest-train {name}", i + 1, len(x))
-        return np.array(d)
-    d_tr = []
-    for i, r in enumerate(tr):
-        d_tr.append(np.sort(np.linalg.norm(tr - r, axis=1))[1])
-        progress("nearest-train train", i + 1, len(tr))
-    d_tr = np.array(d_tr)
-    print(f"\nnearest-train SOAP distance   median      max")
-    print(f"{'train (loo)':<28}{np.median(d_tr):>8.4f}{d_tr.max():>9.4f}")
-    for k in ("valid", "test"):
-        d = nn_dist(desc[(label == k) & ~isolated], k)
-        if len(d):
-            print(f"{k:<28}{np.median(d):>8.4f}{d.max():>9.4f}")
+    if args.mode != "random":
+        # how far each held-out set sits from the training set in descriptor space
+        tr = desc[(label == "train") & ~isolated]
+        def nn_dist(x, name):
+            d = []
+            for i, r in enumerate(x):
+                d.append(np.linalg.norm(tr - r, axis=1).min())
+                progress(f"nearest-train {name}", i + 1, len(x))
+            return np.array(d)
+        d_tr = []
+        for i, r in enumerate(tr):
+            d_tr.append(np.sort(np.linalg.norm(tr - r, axis=1))[1])
+            progress("nearest-train train", i + 1, len(tr))
+        d_tr = np.array(d_tr)
+        print(f"\nnearest-train SOAP distance   median      max")
+        print(f"{'train (loo)':<28}{np.median(d_tr):>8.4f}{d_tr.max():>9.4f}")
+        for k in ("valid", "test"):
+            d = nn_dist(desc[(label == k) & ~isolated], k)
+            if len(d):
+                print(f"{k:<28}{np.median(d):>8.4f}{d.max():>9.4f}")
 
     # physical coverage: a held-out set shifted in volume or energy relative
     # to train means the split is testing extrapolation, not interpolation
